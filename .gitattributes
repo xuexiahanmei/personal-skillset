@@ -1,7 +1,6 @@
-# Text files are LF everywhere, regardless of core.autocrlf. Skill files are read by
-# cross-platform tooling - skill-creator's validator matches the frontmatter with
-# '^---
-' and rejects a CRLF SKILL.md.
+# Text files are LF everywhere, regardless of core.autocrlf. Skill files are read
+# by cross-platform tooling, and skill-creator's validator matches the SKILL.md
+# frontmatter with a pattern that only accepts LF line endings.
 * text=auto eol=lf
 
 # Windows-only scripts are the exception and keep CRLF.
@@ -13,6 +12,6 @@
 # Line endings are all this file controls - not encoding. .ps1 files read by
 # Windows PowerShell 5.1 must be pure ASCII or UTF-8 *with* BOM.
 
-*.png binary
-*.jpg binary
+*.png   binary
+*.jpg   binary
 *.skill binary

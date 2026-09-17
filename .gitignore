@@ -1,0 +1,21 @@
+# Private data - chat exports, message dumps and screenshots are the user's
+# conversations and must never be committed. Keep them in these folders (or
+# anywhere outside the repo).
+exports/
+private/
+screenshots/
+*.jsonl
+line-dom-dump*.json
+
+# Dependencies and caches
+node_modules/
+__pycache__/
+*.pyc
+
+# skill-creator eval workspaces
+*-workspace/
+
+# OS / editor noise
+Thumbs.db
+.DS_Store
+.vscode/

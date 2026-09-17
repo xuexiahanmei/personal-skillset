@@ -1,2 +1,18 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Windows scripts keep CRLF in the working tree; shell scripts must stay LF or they
+# break under WSL / Git Bash.
+*.ps1  text eol=crlf
+*.psm1 text eol=crlf
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+*.sh   text eol=lf
+*.py   text eol=lf
+
+# Line endings are all this file controls - not encoding. .ps1 files read by
+# Windows PowerShell 5.1 must be pure ASCII or UTF-8 *with* BOM.
+
+*.png binary
+*.jpg binary
+*.skill binary

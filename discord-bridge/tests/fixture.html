@@ -1,0 +1,155 @@
+<!doctype html>
+<!--
+  A cut-down copy of Discord's rendered message list, built from the real DOM.
+
+  Names and text are invented. Never paste real conversations in here - this file
+  is committed. Class names keep their hashed suffixes because the extractor
+  matches them by prefix, and shortening them would stop the tests from
+  exercising that.
+
+  What each message is here to cover:
+    1  group start, plain text
+    2  grouped follow-up - no header, so the sender has to be inherited
+    3  a reply - its <li> holds the quoted message's content element as well
+    4  an embed plus an image attachment
+    5  a system join message - no <time>, no sender
+    6  an edited message
+-->
+<html lang="en">
+<body>
+<div class="chat_f75fb0">
+  <div class="messagesWrapper__36d07">
+    <div class="scroller__36d07 scrollerBase_d125d2">
+      <div class="scrollerContent__36d07 content_d125d2">
+        <ol data-list-id="chat-messages" class="scrollerInner__36d07" aria-label="Messages in general">
+
+          <div data-list-item-id="chat-messages___divider" class="divider__5126c hasContent__5126c">
+            <span>September 18, 2026</span>
+          </div>
+
+          <!-- 1: group start -->
+          <li id="chat-messages-900000000000000001-1550000000000000001" class="messageListItem__5126c">
+            <div class="message__5126c cozyMessage__5126c groupStart__5126c wrapper_c19a55">
+              <div class="contents_c19a55">
+                <h3 class="header_c19a55">
+                  <span id="message-username-1550000000000000001" class="headerText_c19a55">
+                    <span class="username_c19a55 clickable_c19a55" data-text="Alex Rivera">Alex Rivera</span>
+                  </span>
+                  <span class="timestamp_c19a55">
+                    <time id="message-timestamp-1550000000000000001" datetime="2026-09-18T02:20:00.000Z"></time>
+                  </span>
+                </h3>
+                <div id="message-content-1550000000000000001" class="markup__75297">deploy is green</div>
+              </div>
+              <div id="message-accessories-1550000000000000001"></div>
+            </div>
+          </li>
+
+          <!-- 2: grouped follow-up, no header at all -->
+          <li id="chat-messages-900000000000000001-1550000000000000002" class="messageListItem__5126c">
+            <div class="message__5126c cozyMessage__5126c wrapper_c19a55">
+              <div class="contents_c19a55">
+                <span class="timestamp_c19a55">
+                  <time id="message-timestamp-1550000000000000002" datetime="2026-09-18T02:20:30.000Z"></time>
+                </span>
+                <div id="message-content-1550000000000000002" class="markup__75297">rolling to prod now</div>
+              </div>
+              <div id="message-accessories-1550000000000000002"></div>
+            </div>
+          </li>
+
+          <!-- 3: a reply. Note the quoted content element sits BEFORE the real body. -->
+          <li id="chat-messages-900000000000000001-1550000000000000003" class="messageListItem__5126c">
+            <div class="message__5126c cozyMessage__5126c groupStart__5126c wrapper_c19a55">
+              <div id="message-reply-context-1550000000000000003" class="repliedMessage_c19a55">
+                <span class="username_c19a55" data-text="Alex Rivera">Alex Rivera</span>
+                <div id="message-content-1550000000000000001" class="repliedTextPreview_c19a55">deploy is green</div>
+              </div>
+              <div class="contents_c19a55">
+                <h3 class="header_c19a55">
+                  <span id="message-username-1550000000000000003" class="headerText_c19a55">
+                    <span class="username_c19a55" data-text="Sam Okafor">Sam Okafor</span>
+                  </span>
+                  <span class="timestamp_c19a55">
+                    <time id="message-timestamp-1550000000000000003" datetime="2026-09-18T02:21:00.000Z"></time>
+                  </span>
+                </h3>
+                <div id="message-content-1550000000000000003" class="markup__75297">nice, thanks for checking</div>
+              </div>
+              <div id="message-accessories-1550000000000000003"></div>
+            </div>
+          </li>
+
+          <!-- 4: embed + image attachment, with a signed query string on the URL -->
+          <li id="chat-messages-900000000000000001-1550000000000000004" class="messageListItem__5126c">
+            <div class="message__5126c cozyMessage__5126c groupStart__5126c wrapper_c19a55">
+              <div class="contents_c19a55">
+                <h3 class="header_c19a55">
+                  <span id="message-username-1550000000000000004" class="headerText_c19a55">
+                    <span class="username_c19a55" data-text="Sam Okafor">Sam Okafor</span>
+                  </span>
+                  <span class="timestamp_c19a55">
+                    <time id="message-timestamp-1550000000000000004" datetime="2026-09-18T02:22:00.000Z"></time>
+                  </span>
+                </h3>
+                <div id="message-content-1550000000000000004" class="markup__75297">https://example.invalid/post</div>
+              </div>
+              <div id="message-accessories-1550000000000000004">
+                <article class="embedWrapper_b52bb5 embed__623de">
+                  <div class="embedProvider_b52bb5">Example</div>
+                  <div class="embedTitle_b52bb5">A post title</div>
+                  <div class="embedDescription_b52bb5">The description line.</div>
+                </article>
+                <a href="https://cdn.discordapp.com/attachments/1/2/diagram.png?ex=abc123&amp;is=def456&amp;hm=0123456789abcdef">diagram.png</a>
+                <img src="https://cdn.discordapp.com/attachments/1/2/diagram.png?ex=abc123" alt="diagram.png">
+              </div>
+            </div>
+          </li>
+
+          <!-- 5: system message - no <time>, no sender -->
+          <li id="chat-messages-900000000000000001-1550000000000000005" class="messageListItem__5126c">
+            <div class="message__5126c cozyMessage__5126c systemMessage__5126c groupStart__5126c isSystemMessage_c19a55 wrapper_c19a55">
+              <div class="contents_c19a55">
+                <div id="message-content-1550000000000000005" class="markup__75297">Welcome, Jordan Blake. Say hello!</div>
+              </div>
+              <div id="message-accessories-1550000000000000005"></div>
+            </div>
+          </li>
+
+          <!-- 6: edited, and padded with zero-width characters the way Discord does -->
+          <li id="chat-messages-900000000000000001-1550000000000000006" class="messageListItem__5126c">
+            <div class="message__5126c cozyMessage__5126c groupStart__5126c wrapper_c19a55">
+              <div class="contents_c19a55">
+                <h3 class="header_c19a55">
+                  <span id="message-username-1550000000000000006" class="headerText_c19a55">
+                    <span class="username_c19a55" data-text="Jordan Blake">Jordan Blake</span>
+                  </span>
+                  <span class="timestamp_c19a55">
+                    <time id="message-timestamp-1550000000000000006" datetime="2026-09-18T02:23:00.000Z"></time>
+                  </span>
+                </h3>
+                <div id="message-content-1550000000000000006" class="markup__75297">on it&#8203;
+                  <span class="edited_c19a55">(edited)</span>
+                </div>
+              </div>
+              <div id="message-accessories-1550000000000000006"></div>
+            </div>
+          </li>
+
+        </ol>
+      </div>
+    </div>
+  </div>
+  <nav class="sidebar_ded4b5">
+    <a href="/channels/@me/1200000000000000001" aria-label="Alex Rivera (Direct Message)" class="link__972a0">Alex Rivera</a>
+    <a href="/channels/@me/1200000000000000002" aria-label="Alexis Chen (Direct Message)" class="link__972a0">Alexis Chen</a>
+    <div data-list-item-id="channels___900000000000000001" aria-label="general (text channel)" class="link__2ea32">general</div>
+    <div data-list-item-id="channels___upcoming-events-900000000000000009" aria-label="Events" class="focusTarget__54e4b">Events</div>
+  </nav>
+  <form class="form_f75fb0">
+    <div role="textbox" data-slate-editor="true" contenteditable="true"
+         aria-label="Message #general" class="slateTextArea_ec4baf"></div>
+  </form>
+</div>
+</body>
+</html>

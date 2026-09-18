@@ -1,0 +1,12 @@
+{
+  "name": "discord-bridge-tests",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Fixture tests for the discord-bridge DOM extractor",
+  "scripts": {
+    "test": "node run.js"
+  },
+  "dependencies": {
+    "jsdom": "^29.1.1"
+  }
+}

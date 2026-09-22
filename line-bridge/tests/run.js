@@ -32,8 +32,9 @@ console.log('--- summary ---');
 console.log(summary);
 console.log('--- checks ---');
 
-check('message count', rows.length, 8);
+check('message count', rows.length, 9);
 check('reply count', summary.replies, 2);
+check('reacted count', summary.reacted, 1);
 check('sorted ascending', rows.map(r => r.ts).every((t, i, a) => i === 0 || t === null || a[i-1] === null || a[i-1] <= t), true);
 
 const reply = rows.find(r => r.id === '900000000000000001');
@@ -85,6 +86,16 @@ check('image.kind', img.kind, 'image');
 const call = rows.find(r => r.id === '900000000000000007');
 check('call.kind', call.kind, 'call');
 check('call.duration', call.duration, '00:14');
+
+const reacted = rows.find(r => r.id === '900000000000000008');
+check('reacted.text', reacted.text, '好啊 都可以');
+check('reacted.reactions (popover button not counted)', reacted.reactions, [{
+  url: 'https://stickershop.line-scdn.net/sticonshop/v1/sticon/6124aa4ae72c607c18108562/android/020_animation.png',
+  productId: '6124aa4ae72c607c18108562',
+  sticonId: '020',
+}]);
+// message 1 carries an EMPTY bubble list, which must not produce the key
+check('empty reaction list -> no reactions key', reply.reactions, undefined);
 
 // date separators must attach to the messages beneath them
 check('date derived from ts, not separator', rows.find(r => r.id === '900000000000000003').date, '2026-09-10');

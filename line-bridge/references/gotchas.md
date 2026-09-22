@@ -109,6 +109,14 @@ extension windows only respond to real input, which needs the foreground.
 `Ctrl+L`, `Ctrl+V`, `Enter` means "address bar, paste, navigate".
 `Invoke-DevToolsJS` refuses to type unless DevTools really is in the foreground.
 
+**The foreground is not enough - Console must be the active panel.** DevTools was
+in front but showing Elements: the paste did nothing and `Enter` opened the
+selected node's `class` attribute for editing. A second call would have pasted
+over that attribute and committed it, rewriting the live page. The bridge threw
+"Console never ran the code" as designed. When it does, capture the DevTools
+window before retrying; if it is not on Console, press Escape (cancels an
+attribute edit without changes) and have the user switch back. Seen 2026-09-22.
+
 **A stale clipboard looks like success.** Scripts that `copy()` their result leave
 the previous result on the clipboard when they never ran. `Invoke-DevToolsJS`
 checks the clipboard changed away from what it pasted; when doing it by hand,

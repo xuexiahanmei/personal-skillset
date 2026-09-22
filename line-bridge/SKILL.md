@@ -25,7 +25,7 @@ any repository - they are the user's private conversations.
 
 | The user wants | Use | Because |
 | --- | --- | --- |
-| What someone said, with reply context | Extension DOM | exact text and quotes; 52 messages cost ~400 tokens as a summary |
+| What someone said, with reply context or reactions | Extension DOM | exact text, quotes and reactions; 52 messages cost ~400 tokens as a summary |
 | To read while the screen is locked, or the extension is not open | Desktop app, cropped screenshots | the only thing that works while locked |
 | Complete history as plain text | `Export-LineChat` + `parse_export.py` | exact, byte-stable; no quotes; briefly takes focus |
 | To send a message | Desktop app | background input, works while locked |
@@ -151,7 +151,7 @@ Full list with the evidence behind each: `references/gotchas.md`.
 | --- | --- |
 | `scripts/line-bridge.ps1` | Desktop app: find/open chats, background click/scroll/type/send, cropped capture, export, lock check |
 | `scripts/devtools-bridge.ps1` | Run a JS expression in the undocked DevTools console and get the result back, safely |
-| `scripts/extract-dom.js` | Paste into the extension's console: `LINEX.dump / collect / loadAll / watch / stop` |
+| `scripts/extract-dom.js` | Paste into the extension's console: `LINEX.dump / collect / loadAll / watch / stop` (text, reply quotes, reactions) |
 | `scripts/dom-probe.js` | Diagnostic for when the extension's markup changes |
 | `scripts/parse_export.py` | "Save chat" `.txt` -> JSONL |
 | `references/gotchas.md` | Every verified trap, plus layout coordinates |

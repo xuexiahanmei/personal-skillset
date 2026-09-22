@@ -37,6 +37,10 @@ globalThis.LINEX = (() => {
     linkDesc:  '[class*="linkbox-module__description__"]',
     readMark:  '[class*="metaInfo-module__read_count__"]',
     sendTime:  '[class*="metaInfo-module__send_time__"]',
+    // Not "reactionPopover-module__…": that is the add-a-reaction button every
+    // message carries, and it matches a looser [class*="reaction"].
+    reactList: '[class*="reactionBubblelist-module__reaction_bubble_list__"]',
+    reactBubble: '[class*="reactionBubble-module__reaction_bubble__"]',
   };
 
   // textContent drops emoji, which LINE renders as <img class="emoji" alt="😀">.
@@ -66,6 +70,25 @@ globalThis.LINEX = (() => {
   function senderFromPrefix(prefix) {
     if (!prefix) return null;
     return prefix.length > 6 ? prefix.slice(6).trim() : prefix.trim();
+  }
+
+  // Reactions sit in a bubble list under the message: one <button> per reaction,
+  // holding the sticon as an <img>. The markup says nothing about WHO reacted or
+  // WHEN. Only single reactions in a 1:1 chat have been seen, so any text on a
+  // bubble (a count, a "+N" overflow) is kept verbatim rather than interpreted.
+  function readReactions(el) {
+    const list = el.querySelector(SEL.reactList);
+    if (!list) return [];
+    return Array.from(list.querySelectorAll(SEL.reactBubble)).map(b => {
+      const img = b.querySelector('img');
+      const url = img ? img.getAttribute('src') : null;
+      // .../sticonshop/v1/sticon/<productId>/android/<sticonId>_animation.png
+      const m = url && url.match(/\/sticon\/([^/]+)\/[^/]+\/(\d+)[_.]/);
+      const r = { url, productId: m ? m[1] : null, sticonId: m ? m[2] : null };
+      const text = readText(b);
+      if (text) r.text = text;
+      return r;
+    });
   }
 
   function classifyAndExtract(el, out) {
@@ -178,6 +201,8 @@ globalThis.LINEX = (() => {
     };
     out.date = localDate(out.ts);
     classifyAndExtract(el, out);
+    const reactions = readReactions(el);
+    if (reactions.length) out.reactions = reactions;
     return out;
   }
 
@@ -208,16 +233,18 @@ globalThis.LINEX = (() => {
 
   function summarize(rows) {
     const byKind = {}, bySender = {};
-    let replies = 0;
+    let replies = 0, reacted = 0;
     for (const r of rows) {
       byKind[r.kind] = (byKind[r.kind] || 0) + 1;
       if (r.sender) bySender[r.sender] = (bySender[r.sender] || 0) + 1;
       if (r.replyTo) replies++;
+      if (r.reactions) reacted++;
     }
     const dated = rows.filter(r => r.datetime);
     return {
       messages: rows.length,
       replies,
+      reacted,
       byKind,
       bySender,
       first: dated.length ? dated[0].datetime : null,

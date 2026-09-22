@@ -62,7 +62,7 @@ the longest known name at the start of each line.
   then a reply to `TEST_A` in Keep Memo and exporting: `TEST_A` appeared once (the
   original) and the reply was a bare line. The phone export does the same (2844
   messages, no reply marker), and right-click -> Copy on a reply copies only the body.
-- Emoji reactions.
+- Emoji reactions (the extension DOM has them - `extension-dom.md`).
 - Read receipts, and time finer than the minute.
 
 For replies, read the Chrome extension's DOM instead (`extension-dom.md`).

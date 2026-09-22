@@ -29,9 +29,24 @@ reply quotes can be read as text.
     "senderMid": "U...",
     "text": "the full text of the message being answered",
     "kind": "text"
-  }
+  },
+  "reactions": [
+    {
+      "url": "https://stickershop.line-scdn.net/sticonshop/v1/sticon/6124aa4ae72c607c18108562/android/020_animation.png",
+      "productId": "6124aa4ae72c607c18108562",
+      "sticonId": "020"
+    }
+  ]
 }
 ```
+
+`reactions` is present only when the message has at least one; the summary counts
+such messages as `reacted`. A reaction is a sticon image, so what it *means* (OK,
+heart, ...) is only in the picture - look at `url`. The markup does not say **who**
+reacted or **when**: in a 1:1 chat a reaction on an incoming message is most likely
+the user's own, and a reaction may have been added long after the message. Only a
+single reaction per message has been seen; any text on a bubble (a count, a "+N")
+is kept verbatim as `text`, uninterpreted.
 
 `kind` is one of `text`, `sticker` (with `sticker.productId`, `sticker.url`),
 `image`, `call` (with `duration`), `system`, `unknown`. Text messages may carry
@@ -41,8 +56,8 @@ The reply object has no id of the message it answers. Link a reply to its origin
 by matching `replyTo.senderMid` + `replyTo.text` against earlier messages; on a real
 chat this resolved 23 of 23 replies.
 
-Neither file export carries any of: reply quotes, second-level time, message ids,
-sender mids, read state, E2EE flag, sticker ids, link previews.
+Neither file export carries any of: reply quotes, reactions, second-level time,
+message ids, sender mids, read state, E2EE flag, sticker ids, link previews.
 
 ## API
 
@@ -50,7 +65,7 @@ sender mids, read state, E2EE flag, sticker ids, link previews.
 | --- | --- |
 | `LINEX.dump({log:false})` | Extract what is rendered; copy JSON to the clipboard |
 | `LINEX.loadAll()` | Scroll the list up until it stops growing, then dump |
-| `LINEX.watch(fn?)` | `MutationObserver`; calls `fn(message)` for each new one |
+| `LINEX.watch(fn?)` | `MutationObserver`; calls `fn(message)` for each new one (a reaction added later to an existing message is not reported) |
 | `LINEX.stop()` | Stop watching |
 | `LINEX.collect()` | The array, without copying |
 
@@ -85,6 +100,12 @@ class selector matches on the prefix (`[class*="message-module__message__"]`).
     </div>
     <span class="metaInfo-module__read_count__…">已讀</span>
     <time class="metaInfo-module__send_time__…" datetime="Sat Sep 12 2026 11:02:49 GMT+0800 (…)">上午 11:02</time>
+    <div class="reactionPopover-module__reaction_popover__…">…</div>   <!-- "add a reaction" button, NOT a reaction -->
+    <div class="reactionBubblelist-module__reaction_bubble_list__…" data-stack="false">   <!-- empty when none -->
+      <button class="reactionBubble-module__reaction_bubble__…" data-more="false" data-fallback="false">
+        <img class="reactionBubble-module__image__…" src="https://stickershop.line-scdn.net/sticonshop/v1/sticon/<productId>/android/<sticonId>_animation.png">
+      </button>
+    </div>
   </div>
   <div class="systemMessage-module__message__…">…以下為尚未閱讀的訊息…</div>
   <div class="messageDate-module__date_wrap__…" data-message-content="2026.9.12 星期六">

@@ -3,7 +3,7 @@
 // Uses the same JSON endpoints the 104 website calls; no login, no browser.
 //
 //   node jobs104.mjs search <keyword> [--area 台北市,新北市] [--cat 軟體工程師] [--salary 50000]
-//                    [--remote full|part] [--sort relevance|date|salary] [--pages 1] [--json]
+//                    [--remote full|part] [--sort relevance|date|salary] [--pages 1] [--all] [--json]
 //   node jobs104.mjs detail <job url | job code> [--json]
 //   node jobs104.mjs codes area|jobcat <name>
 
@@ -143,6 +143,7 @@ async function search(keyword, opt) {
   if (opt.remote) params.set('remoteWork', String(REMOTE[opt.remote] ?? opt.remote));
   if (!keyword && !area.length && !cat.length) throw new Error('Give a keyword, --area or --cat.');
 
+  const matchAll = opt.all ? allTermsMatcher(keyword) : null;
   const pages = Math.max(1, Number(opt.pages ?? 1));
   const seen = new Set();
   const jobs = [];
@@ -158,11 +159,26 @@ async function search(keyword, opt) {
     body.data.forEach((d, i) => {
       if (seen.has(d.jobNo)) return;
       seen.add(d.jobNo);
+      if (matchAll && !matchAll(`${d.jobName}\n${d.description}\n${(d.pcSkills ?? []).map(s => s.description).join(' ')}`)) return;
       jobs.push(summarize(d, i < extra));
     });
     if (page >= lastPage) break;
   }
-  return { total, lastPage, query: Object.fromEntries(params), jobs };
+  return { total, lastPage, scanned: seen.size, all: Boolean(matchAll), query: Object.fromEntries(params), jobs };
+}
+
+// 104 ORs the words of a keyword ("AI Java" returns AI jobs and Java jobs).
+// --all keeps only jobs whose title, description or skills contain every word.
+// Latin words match whole words only, so Java does not match JavaScript and AI
+// does not match Email; CJK words match anywhere.
+function allTermsMatcher(keyword) {
+  const terms = keyword.split(/\s+/).filter(Boolean);
+  if (!terms.length) throw new Error('--all needs a keyword.');
+  const tests = terms.map(t => {
+    const esc = t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return /^[\x00-\x7f]+$/.test(t) ? new RegExp(`(?<![A-Za-z0-9])${esc}(?![A-Za-z0-9])`, 'i') : new RegExp(esc, 'i');
+  });
+  return text => tests.every(re => re.test(text));
 }
 
 async function detail(ref) {
@@ -207,7 +223,8 @@ async function detail(ref) {
 }
 
 function printSearch(r) {
-  console.log(`共 ${r.total} 筆,這裡列出 ${r.jobs.length} 筆(每頁 ${PAGE_SIZE},共 ${r.lastPage} 頁)\n`);
+  const filtered = r.all ? `,看了 ${r.scanned} 筆後符合全部關鍵字的` : '';
+  console.log(`共 ${r.total} 筆${filtered},這裡列出 ${r.jobs.length} 筆(每頁 ${PAGE_SIZE},共 ${r.lastPage} 頁)\n`);
   r.jobs.forEach((j, i) => {
     const tag = j.promoted ? ' [廣告/置頂]' : '';
     console.log(`${i + 1}. ${j.title}${tag}`);
@@ -269,13 +286,13 @@ async function main() {
     for (const h of await findCodes(pos[0], pos.slice(1).join(' '))) console.log(`${h.no}  ${'  '.repeat(h.depth)}${h.des}`);
     return;
   }
-  console.error('usage: jobs104.mjs search <keyword> [--area X] [--cat X] [--salary N] [--remote full|part] [--sort relevance|date|salary] [--pages N] [--json]\n' +
+  console.error('usage: jobs104.mjs search <keyword> [--area X] [--cat X] [--salary N] [--remote full|part] [--sort relevance|date|salary] [--pages N] [--all] [--json]\n' +
                 '       jobs104.mjs detail <job url|code> [--json]\n' +
                 '       jobs104.mjs codes area|jobcat <name>');
   process.exitCode = 2;
 }
 
-export { salaryText, languageText, summarize, parseArgs, search, detail };
+export { salaryText, languageText, summarize, parseArgs, allTermsMatcher, search, detail };
 
 // Compare real paths: the skill is installed through a junction, and Node reports
 // import.meta.url for the resolved target, not the path it was started with.

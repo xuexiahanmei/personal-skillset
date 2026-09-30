@@ -1,7 +1,7 @@
 // node tests/run.mjs            offline checks + one small live search and detail
 // JOBS104_OFFLINE=1 node ...    offline checks only
 import assert from 'node:assert/strict';
-import { salaryText, languageText, summarize, parseArgs, search, detail } from '../scripts/jobs104.mjs';
+import { salaryText, languageText, summarize, parseArgs, allTermsMatcher, search, detail } from '../scripts/jobs104.mjs';
 
 let failed = 0;
 async function check(name, fn) {
@@ -35,6 +35,16 @@ await check('summarize (anonymized listing)', () => {
   assert.deepEqual(s.skills, ['Python']);
 });
 
+await check('allTermsMatcher', () => {
+  const m = allTermsMatcher('AI Java');
+  assert.ok(m('Java 後端工程師,使用 AI 工具開發'));
+  assert.ok(m('資深 java engineer (ai-assisted)'));
+  assert.ok(!m('JavaScript 前端,AI 產品'), 'Java must not match JavaScript');
+  assert.ok(!m('Java 工程師,請寄 Email'), 'AI must not match inside Email');
+  assert.ok(allTermsMatcher('Java 遠端')('Java 軟體工程師(遠端)'));
+  assert.ok(allTermsMatcher('C++')('熟悉 C++ 與 Python'));
+});
+
 await check('parseArgs', () => {
   const { pos, opt } = parseArgs(['python', 'django', '--area', '台北市', '--json']);
   assert.deepEqual(pos, ['python', 'django']);
@@ -51,6 +61,10 @@ if (!process.env.JOBS104_OFFLINE) {
     assert.ok(real.length > 0 && real.length <= 30);
     assert.ok(real.every(j => j.location.startsWith('台北市')), 'a non-promoted job is outside 台北市');
     code = real[0].code;
+  });
+  await check('live search --all', async () => {
+    const r = await search('AI Java', { all: true });
+    assert.ok(r.all && r.scanned > r.jobs.length, 'filter removed nothing');
   });
   await check('live detail', async () => {
     assert.ok(code, 'search gave no job code');

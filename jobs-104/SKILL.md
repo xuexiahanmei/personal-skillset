@@ -29,6 +29,22 @@ filter, sort or compare the results yourself.
 | `--remote` | `full` or `part` | `--remote full` |
 | `--sort` | `relevance` (default), `date`, `salary` | `--sort date` |
 | `--pages` | how many pages of 30 to fetch | `--pages 3` |
+| `--all` | keep only jobs containing **every** keyword | `--all` |
+
+**Several keywords are OR on 104.** `AI Java` returns about 30,000 jobs, most of
+them only AI or only Java. When the user means both, as in "AI+Java 的職缺",
+use `--all` with a few pages:
+
+```
+node $S search "AI Java" --all --pages 5
+```
+
+`--all` checks each job's title, description and listed skills. English words
+match as whole words, so `Java` does not match JavaScript and `AI` does not match
+Email. Chinese words match anywhere. It filters what was fetched, so the result
+is "N of the M scanned", not a count across all of 104. More pages find more.
+Even then, a job can pass on a passing mention, such as "welcome to use AI
+tools", so read `detail` before calling something an AI job.
 
 A keyword is optional when `--area` or `--cat` is given. Names are matched against
 104's own code tables. `臺` and `台` are treated as the same character. A name that

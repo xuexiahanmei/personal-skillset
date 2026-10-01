@@ -142,6 +142,14 @@ user clicked the "Clear console" button, focus stayed on that button: the paste
 went nowhere and Enter pressed the button again (2026-10-01). The capture shows an
 empty console with a ring around the button. Ask the user to click the prompt line.
 
+**While the bridge runs, the extension page is hidden.** DevTools is in front, so
+`document.visibilityState` is `hidden`. Reading and sending in the open chat still
+work, and so does opening another chat from a script - but a chat that was never
+opened since the page loaded then shows an empty message list (2026-10-01: zero
+rows next to a preview of "1"). It is not an extractor bug: the user opens that
+chat once by hand and it works from then on. A page reload resets this, and also
+removes the pasted scripts.
+
 **A new DevTools window starts from nothing.** When the user closes DevTools and
 opens it again, `allow pasting` has to be typed again and `extract-dom.js` /
 `send-dom.js` pasted again. The tell is an empty console; until then every bridge

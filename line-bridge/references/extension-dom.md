@@ -194,6 +194,48 @@ page. That works: no CSP block and no local-network permission prompt (Chrome, a
 of 2026-09-30). If a Chrome update starts blocking it, `LINESEND.relay.status()`
 shows the error in `lastError` and the relay never logs `PAGE installed`.
 
+## The chat list and switching chats
+
+One row per chat, as rendered on 2026-10-01:
+
+```html
+<div class="chatlistItem-module__chatlist_item__…" data-mid="U…"        <!-- the chat's id -->
+     aria-current="true" aria-selected="false"                         <!-- current = the open chat -->
+     style="position: absolute; top: 71px; height: 71px; …">           <!-- virtualised list -->
+  <div class="profileImage-module__thumbnail_wrap__…" data-mid="U…">…</div>
+  <div class="chatlistItem-module__info__…">
+    <strong class="chatlistItem-module__title_box__…">
+      <span class="chatlistItem-module__text__…"><pre><span>王小明</span></pre>…</span>
+    </strong>
+    <time class="chatlistItem-module__date__…" datetime="Thu Oct 01 2026 09:42:24 GMT+0800 (…)">上午 9:42</time>
+    <div class="chatlistItem-module__description__…">…preview of the last message…</div>
+    <span class="chatlistItem-module__message_count__…">2</span>      <!-- only while there are unread messages -->
+  </div>
+  <button role="link" type="button" aria-label="Go chatroom" class="chatlistItem-module__button_chatlist_item__…"></button>
+</div>
+```
+
+What was checked live, with the extension page in the background
+(`document.visibilityState === 'hidden'`):
+
+- **The row updates within about a second** of a new message in that chat, open or
+  not: `datetime` (to the second), the preview, and the unread badge for incoming
+  ones. The relay compares the three together to decide a chat has news.
+- **`button.click()` on the row's button opens the chat** in 0.1-0.9 s: the
+  chatroom's `data-mid`, the header and the `#/chats/<id>` route all follow.
+- **A chat not opened since the page loaded shows nothing** when it is opened this
+  way: `.message_list` holds one empty spacer and no notice, although the row has
+  a preview. After the user opened it once by hand (window visible), opening it
+  from a script in the background shows its messages, new ones included. The
+  relay's start visits each chat and fails with the chat's name when it sees an
+  empty list next to a non-empty preview.
+- **The list is virtualised**: rows scrolled out of view do not exist. Pinned chats
+  stay at the top, so the relay asks for the followed chats to be pinned.
+
+Not verified: group chats (ids starting with `C`), a chat whose only content is
+unsent messages, and what happens to a typed draft when the chat is switched (the
+relay does not switch while the box holds text).
+
 ## When the extension changes
 
 `scripts/dom-probe.js` is a read-only diagnostic: paste it with a known message on
@@ -237,4 +279,6 @@ Then analyse the file with Python. Do not print the JSON into the conversation:
 If `Invoke-DevToolsJS` must load the script itself, read it with
 `[IO.File]::ReadAllText($p, [Text.Encoding]::UTF8)` - see gotchas, Encoding.
 
-Switching the extension to another chat is not implemented; the user clicks it.
+For reading and one-off replies the user picks the chat in the extension. Only the
+relay switches chats by itself, and only between the chats it was told to follow
+(above).

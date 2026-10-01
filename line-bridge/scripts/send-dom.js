@@ -10,7 +10,10 @@
 //   LINESEND.verify()                 -> did a new outgoing bubble with that text appear?
 //   LINESEND.clear()                  -> empties the box, only if it holds the staged text
 //   LINESEND.send(text, name)         -> stage + commit + verify, async (the relay uses it)
-//   LINESEND.relay.start({ token, name, url? }) / .stop() / .status()
+//   LINESEND.chatItem(name)           -> that chat's row in the chat list (id, time, preview, unread)
+//   LINESEND.relay.start({ token, name })      -> auto-reply relay on the open chat
+//   LINESEND.relay.start({ token, names: [] }) -> ...on several chats (it switches chats)
+//   LINESEND.relay.stop() / .status() / .ready()
 //
 // Results that are not ok say which kind of "not ok" they are:
 //   notSent: true      nothing was sent (refused before Enter, or Enter not taken)
@@ -33,6 +36,12 @@ globalThis.LINESEND = (() => {
     room:   '[class*="chatroom-module__chatroom__"]',
     header: '[class*="chatroomHeader-module__header__"]',
     editor: '[class*="chatroomEditor-module__editor_area__"] textarea-ex',
+    // One row of the chat list; its data-mid is that chat's id.
+    listItem:   '[class*="chatlistItem-module__chatlist_item__"]',
+    itemName:   '[class*="chatlistItem-module__text__"] pre',
+    itemDesc:   '[class*="chatlistItem-module__description__"]',
+    itemUnread: '[class*="chatlistItem-module__message_count__"]',
+    itemOpen:   '[class*="chatlistItem-module__button_chatlist_item__"]',
   };
   let pending = null;   // { text, name, before, committed } from the last stage()
 
@@ -166,17 +175,45 @@ globalThis.LINESEND = (() => {
     }
   }
 
+  // ---- the chat list (the relay uses it to follow several chats) ----
+  //
+  // Each row of the list is one chat. Only rows scrolled into view exist (the
+  // list is virtualised), so chats to follow must be pinned to the top.
+  const itemTime = el => {
+    const t = el && el.querySelector('time');
+    const ms = t ? Date.parse((t.getAttribute('datetime') || '').replace(/\s*\(.*\)\s*$/, '')) : NaN;
+    return isNaN(ms) ? 0 : ms;
+  };
+  const itemText = (el, sel) => { const n = el && el.querySelector(sel); return n ? (n.textContent || '').trim() : ''; };
+  // Time, preview and unread badge together: any change means "look inside".
+  const itemSnap = el => [itemTime(el), itemText(el, SEL.itemDesc), itemText(el, SEL.itemUnread)].join('|');
+  const listItems = () => Array.from(document.querySelectorAll(SEL.listItem)).map(el => ({
+    el, chat: el.getAttribute('data-mid'), name: itemText(el, SEL.itemName),
+  }));
+  const itemOf = chat => (listItems().find(i => i.chat === chat) || {}).el || null;
+
+  function chatItem(name) {
+    return listItems().filter(i => i.name === name).map(i => ({
+      name: i.name, chat: i.chat, current: i.el.getAttribute('aria-current') === 'true',
+      time: itemTime(i.el), preview: itemText(i.el, SEL.itemDesc),
+      unread: itemText(i.el, SEL.itemUnread) || null,
+    }));
+  }
+
   // ---- auto-reply relay, page side (server: scripts/relay.py) ----
   //
-  // Every intervalMs, while the open chat is the one pinned at start (header AND
-  // chat id): forward each new incoming message to POST /in; then fetch GET /out
-  // and send each reply meant for this chat, reporting the result to POST /sent.
+  // start({ token, name })      one chat, the one that is open. The relay never
+  //                             switches chats: while another chat is open it waits.
+  // start({ token, names: [] }) several chats, found in the chat list by name. The
+  //                             relay opens whichever has something new, and the
+  //                             chat a reply is for - it drives the window.
+  //
+  // Every intervalMs: forward each new incoming message of a followed chat to
+  // POST /in (tagged with its chat); then fetch GET /out and send each reply in
+  // the chat it was queued for, reporting the result to POST /sent.
   const relay = (() => {
     let cfg = null, timer = null;
-    const st = {
-      ticks: 0, startTs: 0, seen: new Set(), results: new Map(), inflight: new Set(),
-      outbox: [], busy: false, lastError: null,
-    };
+    const st = { ticks: 0, results: new Map(), inflight: new Set(), outbox: [], busy: false, lastError: null };
 
     const call = (c, method, path, body) =>
       fetch(c.url + path + '?t=' + encodeURIComponent(c.token), body === undefined
@@ -184,30 +221,87 @@ globalThis.LINESEND = (() => {
         : { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
         .then(r => { if (!r.ok) throw new Error(path + ' HTTP ' + r.status); return r.json(); });
 
+    const isOpen = t => chatId() === t.chat && header() === t.name;
+    const rowsNow = () => { try { return LINEX.collect(); } catch (e) { return []; } };
+
+    // Open a followed chat by clicking its row, and wait until it is really there.
+    async function open(t) {
+      if (isOpen(t)) return { ok: true };
+      // Never pull the window away from something the user is typing.
+      let b = null;
+      try { b = box(); } catch (e) { /* no chat open: nothing to protect */ }
+      if (b && !isEmpty(b)) {
+        return refuse('the message box is not empty (the user may be typing); not switching to ' + JSON.stringify(t.name));
+      }
+      const el = itemOf(t.chat);
+      if (!el) return refuse(JSON.stringify(t.name) + ' is not in the visible chat list (scrolled out of view?)');
+      const btn = el.querySelector(SEL.itemOpen);
+      if (!btn) return refuse('the chat list row has no open button - has the markup changed?');
+      btn.click();
+      for (const t0 = Date.now(); !isOpen(t);) {
+        if (Date.now() - t0 > 4000) return refuse('clicked ' + JSON.stringify(t.name) + ' but the chat did not open');
+        await sleep(100);
+      }
+      // Let the message list settle: the same row count on two looks.
+      for (let n = -1, i = 0; i < 12; i++) {
+        const m = rowsNow().length;
+        if (m === n) break;
+        n = m;
+        await sleep(150);
+      }
+      return { ok: true, switched: true };
+    }
+
+    // Record what the open chat already holds, so only later messages are forwarded.
+    function baseline(t) {
+      const rows = rowsNow();
+      t.startTs = Math.max(0, ...rows.map(r => r.ts || 0));
+      t.seen = new Set(rows.map(r => r.selectId).filter(Boolean));
+      t.snap = itemSnap(itemOf(t.chat));
+      return rows;
+    }
+
+    // Queue the open chat's new incoming messages for the relay.
+    function collectNew(t) {
+      // In a 1:1 chat (a U... id) every incoming message is the contact's own, so
+      // a row from anyone else means the list is not this chat's yet.
+      const oneToOne = /^U/i.test(t.chat);
+      for (const r of rowsNow()) {
+        if (!r.selectId || t.seen.has(r.selectId)) continue;
+        if (oneToOne && r.direction === 'incoming' && r.senderMid && r.senderMid !== t.chat) continue;
+        t.seen.add(r.selectId);
+        // Newer than everything present at start: history loaded later by
+        // scrolling is older, and is never forwarded.
+        if (r.direction === 'incoming' && (r.ts || 0) > t.startTs) {
+          st.outbox.push({
+            chat: t.name, selectId: r.selectId, time: r.displayTime, sender: r.sender, kind: r.kind,
+            text: r.text, replyTo: r.replyTo || null,
+            sticker: r.sticker ? r.sticker.url : null,
+          });
+        }
+      }
+    }
+
     async function tick() {
-      if (st.busy || !cfg || cfg.stopped) return;
+      if (st.busy || !cfg || cfg.stopped || !cfg.ready) return;
       const c = cfg;   // start() may swap cfg while this tick is waiting
       st.busy = true;
       st.ticks++;
       try {
-        if (header() === c.name && chatId() === c.chat) {
-          // In a 1:1 chat (a U... id) every incoming message is the contact's
-          // own, so a row from anyone else means the list is not this chat's yet.
-          const oneToOne = /^U/i.test(c.chat);
-          for (const r of LINEX.collect()) {
-            if (!r.selectId || st.seen.has(r.selectId)) continue;
-            if (oneToOne && r.direction === 'incoming' && r.senderMid && r.senderMid !== c.chat) continue;
-            st.seen.add(r.selectId);
-            // Newer than everything present at start: history loaded later by
-            // scrolling is older, and is never forwarded.
-            if (r.direction === 'incoming' && (r.ts || 0) > st.startTs) {
-              st.outbox.push({
-                selectId: r.selectId, time: r.displayTime, sender: r.sender, kind: r.kind,
-                text: r.text, replyTo: r.replyTo || null,
-                sticker: r.sticker ? r.sticker.url : null,
-              });
-            }
+        let problem = null;
+        for (const t of c.targets) {
+          if (c.stopped) break;
+          const el = c.follow ? itemOf(t.chat) : null;
+          t.missing = c.follow && !el;
+          if (!isOpen(t)) {
+            // One-chat mode waits for the user to come back. Follow mode goes
+            // there when the chat's row in the list has changed.
+            if (!c.follow || !el || itemSnap(el) === t.snap) continue;
+            const o = await open(t);
+            if (!o.ok) { problem = o.why; continue; }   // try again next tick
           }
+          collectNew(t);
+          if (c.follow) t.snap = itemSnap(itemOf(t.chat));   // after opening, the unread badge is gone
         }
         // Delivered in order; on failure the rest wait for the next tick.
         while (st.outbox.length) { await call(c, 'POST', '/in', st.outbox[0]); st.outbox.shift(); }
@@ -220,18 +314,33 @@ globalThis.LINESEND = (() => {
           }
           if (st.inflight.has(item.id)) continue;
           st.inflight.add(item.id);
-          let res;
-          if (item.chat !== c.name) {
-            res = refuse('reply is for ' + JSON.stringify(item.chat) + ', the relay is on ' + JSON.stringify(c.name));
-          } else {
-            res = await send(item.text, c.name, { chat: c.chat });   // never throws
+          const t = c.targets.find(x => x.name === item.chat);
+          let res = null;
+          if (!t) {
+            res = refuse('reply is for ' + JSON.stringify(item.chat) + ', the relay follows ' +
+                         JSON.stringify(c.targets.map(x => x.name)));
+          } else if (!isOpen(t)) {
+            if (!c.follow) {
+              res = refuse('the relay is on ' + JSON.stringify(t.name) + ' (' + t.chat + '), but the open chat is ' +
+                           JSON.stringify(header()) + ' (' + chatId() + ')');
+            } else {
+              const o = await open(t);
+              if (!o.ok) res = o;
+              else collectNew(t);   // what arrived there meanwhile goes out with the next tick
+            }
+          }
+          if (!res) {
+            res = await send(item.text, t.name, { chat: t.chat });   // never throws
+            // Our own reply changes the chat's row too; note it so the row does
+            // not look like news once another chat is open.
+            if (c.follow) t.snap = itemSnap(itemOf(t.chat));
           }
           const report = Object.assign({ id: item.id, chat: item.chat, text: item.text }, res);
           st.results.set(item.id, report);
           st.inflight.delete(item.id);
           await call(c, 'POST', '/sent', report);
         }
-        st.lastError = null;
+        st.lastError = problem;
       } catch (e) {
         st.lastError = String(e && e.message || e);
       } finally {
@@ -239,26 +348,70 @@ globalThis.LINESEND = (() => {
       }
     }
 
-    function start({ url = 'http://127.0.0.1:38765', token, name, intervalMs = 1500 } = {}) {
-      if (!token || !name) return { ok: false, why: 'relay.start needs { token, name }' };
-      const bad = checkChat(name);
-      if (bad) return { ok: false, why: bad.why };
-      const chat = chatId();
-      if (!chat) return { ok: false, why: 'no chat id (chatroom data-mid) - has the markup changed?' };
+    // Follow mode: visit every chat once, to record what is already there and to
+    // catch a chat whose messages never loaded. A chat not opened since the page
+    // loaded shows nothing when it is opened while the window is hidden.
+    async function visitAll(c) {
+      const original = c.targets.find(isOpen) || null;
+      for (const t of c.targets) {
+        if (c.stopped) throw new Error('stopped while starting');
+        const o = await open(t);
+        if (!o.ok) throw new Error(o.why);
+        const rows = baseline(t);
+        if (!rows.some(r => r.selectId) && itemText(itemOf(t.chat), SEL.itemDesc)) {
+          throw new Error(JSON.stringify(t.name) + ' shows no messages although its preview is not empty: ' +
+                          'open it once by hand with the LINE window visible, then start again');
+        }
+      }
+      if (original) await open(original);   // back to where the user was
+    }
+
+    function start({ url = 'http://127.0.0.1:38765', token, name, names, intervalMs = 1500 } = {}) {
+      const follow = Array.isArray(names);
+      const wanted = follow ? names : (name ? [name] : []);
+      if (!token || !wanted.length) {
+        return { ok: false, why: 'relay.start needs { token, name } or { token, names: [...] }' };
+      }
+      const targets = [];
+      if (!follow) {
+        const bad = checkChat(name);
+        if (bad) return { ok: false, why: bad.why };
+        if (!chatId()) return { ok: false, why: 'no chat id (chatroom data-mid) - has the markup changed?' };
+        targets.push({ name, chat: chatId() });
+      } else {
+        if (new Set(wanted).size !== wanted.length) return { ok: false, why: 'names must be distinct' };
+        const items = listItems();
+        for (const n of wanted) {
+          const hits = items.filter(i => i.name === n);
+          if (hits.length > 1) return { ok: false, why: 'more than one chat in the list is named ' + JSON.stringify(n) };
+          if (!hits.length) return { ok: false, why: JSON.stringify(n) + ' is not in the visible chat list - pin it to the top' };
+          targets.push({ name: n, chat: hits[0].chat });
+        }
+      }
       stop();
-      cfg = { url, token, name, chat };
-      const rows = LINEX.collect();
-      st.startTs = Math.max(0, ...rows.map(r => r.ts || 0));
-      st.seen = new Set(rows.map(r => r.selectId).filter(Boolean));
+      const c = cfg = { url, token, follow, targets, ready: false, stopped: false, starting: null };
       st.results = new Map();
       st.inflight = new Set();
       st.outbox = [];
       st.ticks = 0;
       st.lastError = null;
-      timer = setInterval(tick, intervalMs);
-      call(cfg, 'POST', '/log', { event: 'installed', header: name, chat, ignored: st.seen.size })
-        .catch(e => { st.lastError = String(e && e.message || e); });
-      return { ok: true, header: name, chat, ignored: st.seen.size };
+      const installed = () => call(c, 'POST', '/log', {
+        event: 'installed', chats: targets.map(t => ({ name: t.name, chat: t.chat, ignored: t.seen.size })),
+      }).catch(e => { st.lastError = String(e && e.message || e); });
+      timer = setInterval(tick, intervalMs);   // ticks do nothing until ready
+      if (!follow) {
+        baseline(targets[0]);
+        c.ready = true;
+        c.starting = installed();
+        return { ok: true, header: name, chat: targets[0].chat, ignored: targets[0].seen.size };
+      }
+      c.starting = visitAll(c).then(() => { c.ready = true; return installed(); }, e => {
+        const why = String(e && e.message || e);
+        stop();
+        st.lastError = why;
+        return call(c, 'POST', '/log', { event: 'start-failed', why }).catch(() => {});
+      });
+      return { ok: true, starting: wanted };
     }
 
     // Also stops a tick that is mid-batch: it sends nothing after the current reply.
@@ -271,16 +424,20 @@ globalThis.LINESEND = (() => {
 
     function status() {
       return {
-        running: !!timer, name: cfg && cfg.name, chat: cfg && cfg.chat, header: header(),
-        openChat: chatId(), ticks: st.ticks, waitingToForward: st.outbox.length,
+        running: !!timer, ready: !!(cfg && cfg.ready), follow: !!(cfg && cfg.follow),
+        chats: cfg ? cfg.targets.map(t => ({ name: t.name, chat: t.chat, open: isOpen(t), missing: !!t.missing })) : [],
+        header: header(), openChat: chatId(), ticks: st.ticks, waitingToForward: st.outbox.length,
         lastError: st.lastError,
       };
     }
 
-    return { start, stop, status, tick };
+    // Resolves once a start() has finished starting (follow mode visits each chat first).
+    const ready = () => Promise.resolve(cfg && cfg.starting).then(status);
+
+    return { start, stop, status, ready, tick };
   })();
 
-  return { status, stage, commit, verify, clear, send, relay, header, chatId, SEL };
+  return { status, stage, commit, verify, clear, send, relay, header, chatId, chatItem, SEL };
 })();
 
 console.log('LINESEND ready:  stage / commit / verify / send / relay.start');

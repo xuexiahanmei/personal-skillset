@@ -1,6 +1,6 @@
 {
   "private": true,
-  "description": "Test harness for scripts/extract-dom.js",
-  "scripts": { "test": "node run.js" },
+  "description": "Tests for extract-dom.js, send-dom.js (jsdom) and relay.py (local HTTP)",
+  "scripts": { "test": "node run.js && node send.js && python test_relay.py" },
   "devDependencies": { "jsdom": "^29.1.1" }
 }

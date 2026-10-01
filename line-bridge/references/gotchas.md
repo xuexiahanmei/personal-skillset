@@ -4,7 +4,7 @@ Every item here was hit for real. Grouped by where it bites.
 
 ## Contents
 
-- [Sending](#sending)
+- [Sending (desktop app)](#sending-desktop-app)
 - [Finding and opening chats](#finding-and-opening-chats)
 - [Window handling](#window-handling)
 - [Locked session](#locked-session)
@@ -12,7 +12,10 @@ Every item here was hit for real. Grouped by where it bites.
 - [Encoding](#encoding)
 - [Coordinates and DPI](#coordinates-and-dpi)
 
-## Sending
+## Sending (desktop app)
+
+The desktop app is the fallback; sending from the Chrome extension is in
+`extension-dom.md`, and its traps are under DevTools bridge below.
 
 **Escape closes the pop-out chat window when nothing is open to dismiss.**
 Escape was once sent "just in case" before Enter. No popup was open, so Escape
@@ -117,14 +120,42 @@ over that attribute and committed it, rewriting the live page. The bridge threw
 window before retrying; if it is not on Console, press Escape (cancels an
 attribute edit without changes) and have the user switch back. Seen 2026-09-22.
 
+**A paste can land while its Enter goes elsewhere.** On 2026-09-30 the code reached
+the console prompt, but DevTools' "What's new" drawer opened by itself (after a
+Chrome update) between the paste and the Enter and took focus, and DevTools was no
+longer in front a moment later. The unrun code then sits in the prompt, and the
+next paste is appended to it: the old code runs first, and its `copy()` result
+looks like the new call's answer. After this error, have the user close the drawer
+and clear the prompt (click it, Ctrl+A, Delete). Do not send Ctrl+A / Delete
+yourself: if the Elements panel has focus instead, Delete removes the selected DOM
+node from the live page.
+
+**The bridge owns the clipboard.** Every `Invoke-DevToolsJS` call replaces it,
+first with the wrapped code and then with the result. Scripts put on the clipboard
+for the user to paste were overwritten by a later bridge call, and the user pasted
+a JSON result instead (2026-09-30). Make `Set-Clipboard` the last action before
+asking the user to paste, and make no bridge call until they answer. Afterwards
+check what actually loaded (`typeof LINESEND.chatId`), not that they said so.
+
+**Focus must be in the console prompt, not just on the Console panel.** After the
+user clicked the "Clear console" button, focus stayed on that button: the paste
+went nowhere and Enter pressed the button again (2026-10-01). The capture shows an
+empty console with a ring around the button. Ask the user to click the prompt line.
+
+**A new DevTools window starts from nothing.** When the user closes DevTools and
+opens it again, `allow pasting` has to be typed again and `extract-dom.js` /
+`send-dom.js` pasted again. The tell is an empty console; until then every bridge
+call fails with "Console never ran the code", because Chrome refuses the paste.
+
 **A stale clipboard looks like success.** Scripts that `copy()` their result leave
 the previous result on the clipboard when they never ran. `Invoke-DevToolsJS`
 checks the clipboard changed away from what it pasted; when doing it by hand,
 compare hashes between runs.
 
 **Large pastes are the unreliable part.** A 10 KB paste repeatedly failed to land
-while short expressions went through. Load `extract-dom.js` once (by hand is fine)
-and drive it with short calls.
+while short expressions went through; a 3.6 KB single-line expression did work
+(2026-09-30). Load `extract-dom.js` and `send-dom.js` once (by hand is fine) and
+drive them with short calls.
 
 **`allow pasting`** must be typed once per DevTools session before Chrome accepts a
 paste into the console.
@@ -136,8 +167,10 @@ also blocked in this harness. The DevTools console on the user's own window is t
 way in.
 
 **The console keeps definitions between pastes.** `extract-dom.js` assigns
-`globalThis.LINEX` so re-pasting a newer version replaces the old one instead of
-throwing "already declared".
+`globalThis.LINEX` (and `send-dom.js` `globalThis.LINESEND`) so re-pasting a newer
+version replaces the old one instead of throwing "already declared". A timer does
+not go away with its object, though: `send-dom.js` stops the previous relay page
+side before replacing it, or two pollers would share one queue.
 
 ## Encoding
 
@@ -156,6 +189,12 @@ are kept pure ASCII so dot-sourcing them never has this problem.
 
 **Python on this machine prints with cp1252 by default.** Set
 `PYTHONIOENCODING=utf-8` before printing anything with CJK in it.
+
+**curl.exe reads its command line in the ANSI code page.** From Git Bash,
+`curl --data-binary '{"text":"你好"}'` sent Big5 bytes (`0xA7 0x41` for 你), and a
+UTF-8 JSON server rejected the body. Python gets its arguments as Unicode, so post
+CJK from Python (`relay.py queue`), with the JSON `ensure_ascii`-escaped, or from a
+file written as UTF-8.
 
 **`grep -P` does not work in this Git Bash locale** and fails quietly behind
 `|| echo 0`. Use Python for anything involving non-ASCII.

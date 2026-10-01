@@ -5,6 +5,12 @@ LINE desktop's `...` menu -> **Save chat** writes the whole conversation as text
 complete history as exact text when reply quotes do not matter - it is also the
 ground truth to check anything else against.
 
+It needs the desktop app, so ask the user first (SKILL.md: Chrome is the default).
+For a JSON file of the chat, `LINEX.loadAll({ copy: false })` in the extension may
+be enough.
+
+`$private` is any folder outside a repository (the session scratchpad will do).
+
 ```powershell
 . "$SkillDir\scripts\line-bridge.ps1"
 $chat = Open-LineChatByName -Name "王小明"

@@ -64,7 +64,7 @@ message ids, sender mids, read state, E2EE flag, sticker ids, link previews.
 | Call | Does |
 | --- | --- |
 | `LINEX.dump({log:false})` | Extract what is rendered; copy JSON to the clipboard |
-| `LINEX.loadAll()` | Scroll the list up until it stops growing, then dump |
+| `LINEX.loadAll({ copy? })` | Scroll the list up until it stops growing, then dump; `copy: false` skips the clipboard (use it through the bridge) |
 | `LINEX.watch(fn?)` | `MutationObserver`; calls `fn(message)` for each new one (a reaction added later to an existing message is not reported) |
 | `LINEX.stop()` | Stop watching |
 | `LINEX.collect()` | The array, without copying |
@@ -126,6 +126,74 @@ Things that went wrong in the extractor, and why the code looks the way it does:
   `HH:MM ` prefix rather than split on whitespace.
 - **Zero-width joiners** separate some nodes; they are stripped.
 
+## The message box and sending (`send-dom.js`)
+
+The open chat, its header and the message box, as rendered on 2026-09-30:
+
+```html
+<div class="chatroom-module__chatroom__…" data-mid="U…">   <!-- the chat's id; one per page -->
+<div class="chatroomHeader-module__header__…">…王小明…</div>   <!-- first line of innerText = chat name -->
+…
+<div class="message_list" role="log">…</div>
+…
+<div class="chatroomEditor-module__editor_area__…">
+  <textarea-ex data-is-empty="true" class="text chatroomEditor-module__textarea__…"
+               placeholder="輸入訊息" maxlength="10000">
+    #shadow-root (open)
+      <textarea part="input" class="input" placeholder="輸入訊息" maxlength="10000"></textarea>
+      <div class="cover" part="cover"></div>
+  </textarea-ex>
+  <div class="actionGroup-module__action_box__…">   <!-- Send file / Capture screen / Select sticker -->
+</div>
+</div>
+```
+
+The chatroom element's `data-mid` is the chat's id: it equals the `#/chats/<id>`
+route and, in a 1:1 chat, the contact's mid on every incoming message (checked
+2026-09-30). Header, message list and box all sit inside it. `send-dom.js` looks
+the box up inside the editor area, and the relay pins this id at `start`, so
+another chat with the same display name cannot take its place. Whether the list
+can briefly lag the header during a chat switch is not known (not observed); in a
+1:1 chat (an id starting with `U`) the relay therefore also forwards only rows
+whose `data-mid` is the contact's.
+
+`<textarea-ex>` is a Lit web component (its instance carries `_$E…` fields and
+`renderOptions`). Its `.value` is an **array**: `[]` when empty, `["text"]` with
+text. There is **no send button** - Enter sends.
+
+What sends a message, verified live: set the inner `<textarea>`'s value through the
+native `HTMLTextAreaElement.prototype` value setter (the verified way; a plain
+`.value =` was not tried), dispatch an `input` `InputEvent` (bubbles, composed) - the
+component then reports `data-is-empty="false"` and `.value == ["text"]` - and
+dispatch a synthetic `keydown` Enter on the same textarea. The app calls
+`preventDefault` on it (so `handled: true` from `commit`), sends, and empties the
+box. The first send this way was cross-checked in the desktop app's chat list,
+which syncs from LINE's servers, so it is a real send, not only a rendered bubble.
+
+Not verified: multi-line text (Shift+Enter), inserting emoji or sticons, stickers,
+texts near the 10000-character limit, and whether the extension ever shows sticker
+suggestions after a short greeting the way the desktop app does. One greeting-like
+send (`早安～今天也順利`, 2026-10-01) went out as plain text. `send-dom.js` refuses
+multi-line text.
+
+"Empty" means both `data-is-empty="true"` and an empty inner textarea: the
+attribute is updated by the component and can lag behind the textarea.
+
+`LINESEND.verify()` treats a send as landed when the number of outgoing messages
+with exactly that text (as `LINEX` reads it: trimmed, emoji restored from `alt`)
+has grown since `stage`. It does not require the box to be empty again - the user
+may start typing the moment the bubble lands - but reports it as `boxEmpty`.
+
+A result that is not ok says which kind it is. `notSent: true`: nothing went out -
+refused before Enter, or Enter not taken (the box still held the text afterwards).
+`unconfirmed: true`: the box emptied but no matching bubble appeared - the message
+may have been sent, so read the chat before sending it again.
+
+**The relay's page side** fetches `http://127.0.0.1:<port>` from the extension
+page. That works: no CSP block and no local-network permission prompt (Chrome, as
+of 2026-09-30). If a Chrome update starts blocking it, `LINESEND.relay.status()`
+shows the error in `lastError` and the relay never logs `PAGE installed`.
+
 ## When the extension changes
 
 `scripts/dom-probe.js` is a read-only diagnostic: paste it with a known message on
@@ -150,12 +218,15 @@ is in a different chat than the one open - check that first.
 
 1. The user opens the extension window, right-clicks -> Inspect, undocks DevTools
    (separate window), opens **Console**, types `allow pasting` once.
-2. Load `extract-dom.js` - pasting by hand is the reliable way.
-3. Drive it with short calls through `Invoke-DevToolsJS` (`scripts/devtools-bridge.ps1`):
+2. Load `extract-dom.js` and `send-dom.js` - pasting by hand is the reliable way;
+   SKILL.md has a snippet that puts both on the clipboard at once. Re-pasting
+   either replaces the old version; re-pasting `send-dom.js` also stops a running
+   relay page side.
+3. Drive them with short calls through `Invoke-DevToolsJS` (`scripts/devtools-bridge.ps1`):
 
 ```powershell
 . "$SkillDir\scripts\devtools-bridge.ps1"
-Invoke-DevToolsJS -Code "typeof LINEX" -Raw                 # "object" when loaded
+Invoke-DevToolsJS -Code "[typeof LINEX, typeof LINESEND]" -Raw   # ["object","object"] when loaded
 $json = Invoke-DevToolsJS -Code "LINEX.collect()" -Raw
 [IO.File]::WriteAllText("$scratch\chat.json", $json, (New-Object Text.UTF8Encoding $false))
 ```

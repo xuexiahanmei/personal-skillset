@@ -39,6 +39,9 @@ public class DT {
   public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@
 }
@@ -133,4 +136,28 @@ function Invoke-DevToolsJS {
 function Test-LinexLoaded {
   try { $r = Invoke-DevToolsJS -Code "typeof LINEX" -Raw; return ($r -replace '"','') -eq 'function' -or ($r -replace '"','') -eq 'object' }
   catch { return $false }
+}
+
+# Save what the DevTools window shows, without focusing it (PrintWindow). Look at
+# it after "Console never ran the code" and before any retry: a panel other than
+# Console, the "What's new" drawer, or an unrun line in the prompt all need the
+# user to fix. -MaxHeight crops from the top; the prompt is at the bottom, so pass
+# the full height (or crop the bottom half yourself) when the prompt matters.
+function Save-DevToolsShot {
+  param([Parameter(Mandatory)][string]$Path, [int]$MaxHeight = 2000)
+  Add-Type -AssemblyName System.Drawing
+  $dt = Get-DevToolsWindow
+  $r = New-Object DT+RECT
+  [void][DT]::GetWindowRect($dt.Handle, [ref]$r)
+  $w = $r.Right - $r.Left; $h = $r.Bottom - $r.Top
+  $bmp = New-Object System.Drawing.Bitmap $w, $h
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $hdc = $g.GetHdc()
+  $printed = [DT]::PrintWindow($dt.Handle, $hdc, 2)   # PW_RENDERFULLCONTENT
+  $g.ReleaseHdc($hdc); $g.Dispose()
+  $keep = [Math]::Min($h, $MaxHeight)
+  $out = $bmp.Clone((New-Object System.Drawing.Rectangle 0, 0, $w, $keep), $bmp.PixelFormat)
+  $out.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+  $out.Dispose(); $bmp.Dispose()
+  "{0}|{1}x{2}|PrintWindow={3}|{4}" -f $dt.Title, $w, $keep, $printed, $Path
 }

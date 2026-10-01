@@ -9,6 +9,7 @@
 //   3. Paste this whole file, press Enter
 //   4. LINEX.dump()          -> extract what is currently rendered, copies JSON
 //      LINEX.loadAll()       -> scroll up until history stops growing, then dump
+//                               ({ copy: false } when driven through the bridge)
 //      LINEX.watch()         -> stream new messages live as they arrive
 //      LINEX.stop()          -> stop watching
 //
@@ -263,7 +264,9 @@ globalThis.LINEX = (() => {
   }
 
   // Scroll the message pane up until it stops producing older messages.
-  async function loadAll({ maxRounds = 200, pause = 350 } = {}) {
+  // copy: false skips the clipboard: driven through the DevTools bridge, a late
+  // copy() would land on the clipboard mid-call and read as another call's answer.
+  async function loadAll({ maxRounds = 200, pause = 350, copy: toClipboard = true } = {}) {
     const list = document.querySelector(SEL.list);
     const pane = list.closest('[class*="scroll"]') || list.parentElement;
     let last = -1, stable = 0;
@@ -276,7 +279,9 @@ globalThis.LINEX = (() => {
       if (i % 10 === 0) console.log('loading… messages so far:', n);
     }
     console.log('finished loading, messages:', list.querySelectorAll(SEL.message).length);
-    return dump({ log: false });
+    if (toClipboard) return dump({ log: false });
+    const rows = collect();
+    return { summary: summarize(rows), messages: rows };
   }
 
   let observer = null;

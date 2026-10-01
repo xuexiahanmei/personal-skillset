@@ -6,6 +6,8 @@ private/
 screenshots/
 *.jsonl
 line-dom-dump*.json
+relay.log
+relay.token
 
 # Dependencies and caches
 node_modules/

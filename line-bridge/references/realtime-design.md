@@ -1,9 +1,10 @@
 # Reading LINE messages in real time — what works, what doesn't
 
 > **Superseded.** This was the plan before the Chrome extension's DOM was found to
-> carry reply quotes. For real-time reading use `LINEX.watch()` from
-> `scripts/extract-dom.js` (see `extension-dom.md`): a `MutationObserver` delivers
-> each new message as exact JSON, with no polling, screenshots or OCR. What below is
+> carry reply quotes. For real-time reading and replying use the relay (SKILL.md,
+> "Auto-reply: the relay"): the extension page reads each new message as exact JSON
+> and hands it to Claude through `scripts/relay.py`, with no screenshots or OCR and
+> no focus taken after setup. What below is
 > still accurate: the measurements (WAL mtime behaviour, PrintWindow cost) and the
 > dead ends. Kept for the reasoning, not as instructions.
 

@@ -64,7 +64,7 @@ message ids, sender mids, read state, E2EE flag, sticker ids, link previews.
 | Call | Does |
 | --- | --- |
 | `LINEX.dump({log:false})` | Extract what is rendered; copy JSON to the clipboard |
-| `LINEX.loadAll({ copy? })` | Scroll the list up until it stops growing, then dump; `copy: false` skips the clipboard (use it through the bridge) |
+| `LINEX.loadAll({ copy?, deadlineMs?, sleep? })` | Scroll the list up until it stops growing, then dump; `copy: false` skips the clipboard (use it through the bridge). `deadlineMs` stops on the clock; a load that did not reach the end returns `truncated: true` |
 | `LINEX.watch(fn?)` | `MutationObserver`; calls `fn(message)` for each new one (a reaction added later to an existing message is not reported) |
 | `LINEX.stop()` | Stop watching |
 | `LINEX.collect()` | The array, without copying |
@@ -179,20 +179,38 @@ multi-line text.
 "Empty" means both `data-is-empty="true"` and an empty inner textarea: the
 attribute is updated by the component and can lag behind the textarea.
 
-`LINESEND.verify()` treats a send as landed when the number of outgoing messages
-with exactly that text (as `LINEX` reads it: trimmed, emoji restored from `alt`)
-has grown since `stage`. It does not require the box to be empty again - the user
-may start typing the moment the bubble lands - but reports it as `boxEmpty`.
+`LINESEND.verify()` treats a send as landed when an outgoing bubble that was not
+there at `stage` (by its `selectId`) is now in the same chat with that text, and is
+not older than what was newest at `stage` (less two minutes, for two clocks that
+need not agree): an old message with the same text that scrolls into view while
+waiting is not the one just sent (tests/send.js, "an older bubble with the same
+text"). The text is compared after the clean-up `LINEX` applies when it reads -
+trimmed, emoji restored from `alt`, zero-width characters dropped, runs of
+whitespace collapsed: in the mock page a byte-for-byte comparison called a sent
+emoji sequence (which holds a zero-width joiner) unconfirmed; how real emoji read
+back has not been tried. It does not require the box to be empty again -
+the user may start typing the moment the bubble lands - but reports it as
+`boxEmpty`. With another chat open than the one typed in, it answers `moved`
+instead of counting that chat's bubbles: before this, a send that never left was
+reported `ok` when the user switched to a chat that already held the same text
+(tests/send.js, "the chat changed right after Enter").
 
 A result that is not ok says which kind it is. `notSent: true`: nothing went out -
-refused before Enter, or Enter not taken (the box still held the text afterwards).
-`unconfirmed: true`: the box emptied but no matching bubble appeared - the message
-may have been sent, so read the chat before sending it again.
+refused before Enter, called off by `beforeCommit`, or Enter not taken (the app did
+not call `preventDefault` and the box still held the text afterwards).
+`unconfirmed: true`: the message may have been sent, so read the chat before
+sending it again - the box emptied but no matching bubble appeared, another chat
+was opened right after Enter, or the app took the Enter and the text is still in
+the box (then it is left there, not cleared). `send()` waits on the clock
+(`timeoutMs`), not for a number of sleeps: a hidden page's timers run about once a
+minute, and twenty of them used to hold the relay for twenty minutes.
 
-**The relay's page side** fetches `http://127.0.0.1:<port>` from the extension
-page. That works: no CSP block and no local-network permission prompt (Chrome, as
-of 2026-09-30). If a Chrome update starts blocking it, `LINESEND.relay.status()`
-shows the error in `lastError` and the relay never logs `PAGE installed`.
+**The page side** fetches `http://127.0.0.1:<port>` from the extension page. That
+works for relay.py's plain requests: no CSP block and no local-network permission
+prompt (Chrome, as of 2026-09-30). If a Chrome update starts blocking it,
+`LINESEND.relay.status()` shows the error in `lastError` and the relay never logs
+`PAGE installed`. The hub's requests carry a custom header, which makes Chrome
+send a preflight first; that has not been seen live yet (see "Not verified live").
 
 ## The chat list and switching chats
 
@@ -236,6 +254,118 @@ Not verified: group chats (ids starting with `C`), a chat whose only content is
 unsent messages, and what happens to a typed draft when the chat is switched (the
 relay does not switch while the box holds text).
 
+## The hub and the page (`LINESEND.relay.link`, `mcp/hub.mjs`)
+
+`relay.link({ url, token, build })` is the page side of the MCP tools. It asks the
+hub for work in a loop and does one item at a time: a message to send, or one of
+four ops - `status`, `read`, `follow`, `unfollow`. The ops live in a `Map`; nothing
+that arrives is run as code, and the URL and token cannot be changed from the hub.
+
+```
+GET  /poll?wait=..   -> { epoch, follow: [chat ids], items: [0 or 1] }   409: a newer paste took over, stop
+POST /commit {id}    -> { go }                          asked right before Enter
+POST /sent  {id, chat, chatId, text, ok | notSent | unconfirmed, why}
+POST /result {id, ok, value | why}                      an op's answer
+POST /in    {chat, chatId, selectId, ts, sender, kind, text, replyTo, sticker}
+POST /log   {event: linked | unfollowed | not-restored, ...}
+GET  /wait?ms=..                                        a wait timed by the hub
+```
+
+Every request carries the page token in the header `x-line-bridge-token` (a URL
+shows up in the page's resource timings) and `i` (a random id for this paste), `l`
+(when it linked) and `b` (the build, a hash of the two scripts as pasted) in the query.
+The page token is not the control secret: it only opens the page's endpoints, and
+only for the LINE extension's origin. It does stay where a paste leaves things -
+the clipboard, Windows' clipboard history if that is on, the DevTools console
+history - until `line_setup` runs again with no page linked, which replaces it.
+
+What keeps a message from going out twice, late or to the wrong chat. Each rule
+has a check in `tests/hub.test.js`, `tests/hub-page.test.js` or `tests/send.js`,
+and on 2026-10-01 each check was shown to fail with its rule taken out (34 rules
+broken one at a time in a copy of the code; all 34 noticed):
+
+- **Ids come from the caller** (a UUID per tool call), and the hub never runs one
+  twice. The page also remembers the ids it handled - for as long as that paste
+  lives; a new paste starts empty.
+- **One hand-over.** The hub gives an item to the page once. relay.py leases a
+  reply for 60 s and then offers it again - to a freshly pasted page, which would
+  send it a second time.
+- **The go before Enter.** The page types, waits 300 ms, and asks `POST /commit`.
+  The hub says go only while the caller still waits, the time limit (75 s from
+  the request) has not passed and, for an auto-reply, its approval still stands;
+  without a go the page takes its text back and reports `notSent`. A go that the
+  page gets to act on more than 5 s after asking (a debugger pause, a frozen tab)
+  is not acted on either. So "timed out before the go" is a definite `notSent`,
+  and only "go, then no report" is `unconfirmed`.
+- **Reports are kept.** A `/sent` the hub did not get stays in the page and is
+  offered again each round, also to another hub on the same port, which logs it
+  with `late: true`. The exception is a page that was told to stop (a newer paste,
+  a refused token): what it had not reported stays unreported, and the caller is
+  told `unconfirmed`.
+- **The chat is bound by id.** A send names `chatId`; the row's name must still go
+  with it, and the hub only accepts an (id, name) pair this page reported.
+- **Switching chats** (only in link mode): not while the message box holds text,
+  not while the LINE window has the keyboard focus (`document.hasFocus()`: the
+  user's next keystroke would land in the chat switched to). After a switch,
+  nothing is read or typed until the list has stopped showing every message it
+  held before the click (by `selectId`; 2 s, then a refusal) - in case the list
+  can lag the header. A chat whose messages did not load is refused before
+  anything is typed. A read that loads older messages returns nothing if another
+  chat was opened while it ran. After a direct send or a read the
+  page goes back to the chat that was open - after reporting, asking the same
+  questions again right before the click, and only away from a chat that item
+  itself opened (`restored: false` otherwise; `PAGE not-restored` when the click
+  back failed).
+- **The hub decides what is followed.** Every answer to a poll lists the followed
+  chat ids; the page drops whatever is not listed, and everything when another hub
+  answers (a new `epoch`). So a follow whose caller went away mid-way, or whose
+  session ended (the hub ends it after 45 s without a word from that session), or
+  that `line_unfollow` stopped while the page was silent, does not go on. And no
+  chat is opened except right after an answer from the hub: with the hub away,
+  nothing is marked read for nobody.
+- **Nothing follows again by itself, and nothing old is reported as new.** After
+  a restart or a new paste, following takes a new `line_follow`, and a newly
+  followed chat starts from what is in it then: none of that is forwarded as
+  `IN`. The follow's answer says per chat how many incoming messages came after
+  the last outgoing one (`unanswered`), for the caller to read and decide. Only a
+  chat that is still followed when it is followed again goes on from where it
+  stands. A follow takes effect whole or not at all: one that fails at its third
+  chat leaves the chats followed before, and what was waiting in them, as they
+  were. (An earlier version kept a dropped follow's position for ten minutes to
+  resume from; a second review showed it replaying hours-old, already answered
+  messages as new ones, so it is gone.)
+
+The page's waits are timed by the hub in link mode (`GET /wait`, and each `/poll`
+is held up to 1.5 s): an answer to a fetch arrives when it is sent, while a hidden
+page's own timers run about once a minute. With no hub, it falls back to timers.
+
+### Not verified live
+
+As of 2026-10-01 everything in this section ("The hub and the page") has run
+against the mock page only (`tests/mock-line.js`); what the earlier sections call
+verified live was verified through the console bridge.
+
+- What a bubble that failed to send looks like (offline, or LINE refusing it). If
+  it is rendered like any other outgoing row, `verify()` takes it for sent.
+- Whether the message list can lag the header after a scripted switch. The page
+  waits until none of the messages shown before the click is still shown; if LINE
+  were to show something else in between (neither the old chat nor the new), it
+  would be taken for the new chat's.
+- Chrome sends `Origin: chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc` on
+  these fetches, accepts the hub's preflight answer for the token header, and
+  shows no local-network prompt. (The hub answers that origin only.)
+- An answer to a fetch is not delayed in a hidden or minimised window the way
+  timers are - the reason for the hub-timed waits.
+- `document.hasFocus()` is true only while the LINE window has the keyboard focus,
+  and false while its DevTools window has it.
+- A paste of both scripts plus the link line lands whole. It is about 40 KB
+  (2026-10-02): `line_setup` leaves out comment lines, blank lines and indentation,
+  which takes it down from 63 KB. About 34 KB had been pasted by hand before.
+- Group chats (`C...` ids) open and load like 1:1 chats, and their header's first
+  line equals the row's name.
+- Text with emoji or several spaces reads back, after the clean-up above, equal to
+  what was sent.
+
 ## When the extension changes
 
 `scripts/dom-probe.js` is a read-only diagnostic: paste it with a known message on
@@ -258,12 +388,21 @@ is in a different chat than the one open - check that first.
 
 ## Getting the script into the console
 
+With the MCP tools: `line_setup` puts both scripts and the `relay.link(...)` line
+on the clipboard; the user pastes once per page load (SKILL.md, "Linking the
+page"), and everything after goes through the hub. What it copies is the scripts
+with every line trimmed and the comment and blank lines left out - the same
+program at two thirds of the size - so neither script may hold a string or a
+template literal that runs over several lines (`tests/mcp.test.js` checks that,
+and runs the pasted text). Without the tools:
+
 1. The user opens the extension window, right-clicks -> Inspect, undocks DevTools
    (separate window), opens **Console**, types `allow pasting` once.
 2. Load `extract-dom.js` and `send-dom.js` - pasting by hand is the reliable way;
-   SKILL.md has a snippet that puts both on the clipboard at once. Re-pasting
-   either replaces the old version; re-pasting `send-dom.js` also stops a running
-   relay page side.
+   `devtools-bridge.md` has a snippet that puts both on the clipboard at once.
+   Re-pasting either replaces the old version; re-pasting `send-dom.js` also stops
+   a running relay page side (a message it is sending at that moment still goes
+   out once and is reported).
 3. Drive them with short calls through `Invoke-DevToolsJS` (`scripts/devtools-bridge.ps1`):
 
 ```powershell
@@ -279,6 +418,7 @@ Then analyse the file with Python. Do not print the JSON into the conversation:
 If `Invoke-DevToolsJS` must load the script itself, read it with
 `[IO.File]::ReadAllText($p, [Text.Encoding]::UTF8)` - see gotchas, Encoding.
 
-For reading and one-off replies the user picks the chat in the extension. Only the
-relay switches chats by itself, and only between the chats it was told to follow
-(above).
+On this path, for reading and one-off replies the user picks the chat in the
+extension; only relay.py's page side switches chats by itself, and only between the
+chats it was told to follow. In link mode the page switches to the chat a tool
+names, under the guards listed in "The hub and the page".

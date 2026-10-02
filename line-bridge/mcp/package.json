@@ -1,0 +1,12 @@
+{
+  "name": "line-bridge-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server for the line-bridge skill: the LINE Chrome extension as tools, over a local hub",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.2.0",
+    "zod": "^4.2.0"
+  }
+}

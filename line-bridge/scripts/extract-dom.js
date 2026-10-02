@@ -266,22 +266,29 @@ globalThis.LINEX = (() => {
   // Scroll the message pane up until it stops producing older messages.
   // copy: false skips the clipboard: driven through the DevTools bridge, a late
   // copy() would land on the clipboard mid-call and read as another call's answer.
-  async function loadAll({ maxRounds = 200, pause = 350, copy: toClipboard = true } = {}) {
+  // deadlineMs stops on the clock (a hidden page's timers run about once a
+  // minute, so a count of rounds can mean hours); sleep replaces the timer the
+  // pause runs on. Either way a load that did not reach the end says truncated.
+  async function loadAll({ maxRounds = 200, pause = 350, copy: toClipboard = true, deadlineMs, sleep } = {}) {
     const list = document.querySelector(SEL.list);
     const pane = list.closest('[class*="scroll"]') || list.parentElement;
-    let last = -1, stable = 0;
+    const wait = sleep || (ms => new Promise(r => setTimeout(r, ms)));
+    const until = deadlineMs ? Date.now() + deadlineMs : Infinity;
+    let last = -1, stable = 0, complete = false;
     for (let i = 0; i < maxRounds; i++) {
       const n = list.querySelectorAll(SEL.message).length;
-      if (n === last) { if (++stable >= 3) break; } else { stable = 0; }
+      if (n === last) { if (++stable >= 3) { complete = true; break; } } else { stable = 0; }
       last = n;
+      if (Date.now() >= until) break;
       pane.scrollTop = 0;
-      await new Promise(r => setTimeout(r, pause));
+      await wait(pause);
       if (i % 10 === 0) console.log('loading… messages so far:', n);
     }
     console.log('finished loading, messages:', list.querySelectorAll(SEL.message).length);
-    if (toClipboard) return dump({ log: false });
-    const rows = collect();
-    return { summary: summarize(rows), messages: rows };
+    const rows = toClipboard ? null : collect();
+    const out = toClipboard ? dump({ log: false }) : { summary: summarize(rows), messages: rows };
+    if (!complete) out.truncated = true;
+    return out;
   }
 
   let observer = null;

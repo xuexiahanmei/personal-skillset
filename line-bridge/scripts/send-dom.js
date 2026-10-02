@@ -5,13 +5,19 @@
 // to type unless the chat header shows the name it was given.
 //
 //   LINESEND.status()                 -> { header, chat, empty, value }
-//   LINESEND.stage(text, name)        -> types text into the box; does NOT send
-//   LINESEND.commit(text, name)       -> presses Enter if the box holds exactly text
+//   LINESEND.stage(text, name, chat)  -> types text into the box; does NOT send
+//   LINESEND.commit(text, name, chat) -> presses Enter if the box holds exactly text
 //   LINESEND.verify()                 -> did a new outgoing bubble with that text appear?
 //   LINESEND.clear()                  -> empties the box, only if it holds the staged text
-//   LINESEND.send(text, name)         -> stage + commit + verify, async (the relay uses it)
+//   LINESEND.send(text, name, { chat, beforeCommit })
+//                                     -> stage + commit + verify, async (the relay uses it)
+// `chat` is the chat id (status().chat); optional, and worth passing: two
+// contacts can share a display name.
 //   LINESEND.chatItem(name)           -> that chat's row in the chat list (id, time, preview, unread)
-//   LINESEND.relay.start({ token, name })      -> auto-reply relay on the open chat
+//   LINESEND.relay.link({ url, token, build }) -> the page side of the MCP hub (mcp/hub.mjs):
+//                                                 read, send, follow on request. line_setup
+//                                                 puts this line on the clipboard, filled in.
+//   LINESEND.relay.start({ token, name })      -> the older relay (relay.py) on the open chat
 //   LINESEND.relay.start({ token, names: [] }) -> ...on several chats (it switches chats)
 //   LINESEND.relay.stop() / .status() / .ready()
 //
@@ -43,11 +49,14 @@ globalThis.LINESEND = (() => {
     itemUnread: '[class*="chatlistItem-module__message_count__"]',
     itemOpen:   '[class*="chatlistItem-module__button_chatlist_item__"]',
   };
-  let pending = null;   // { text, name, before, committed } from the last stage()
+  let pending = null;   // { text, name, chat, before, committed, handled } from the last stage()
 
   const refuse = why => ({ ok: false, notSent: true, why });
   const unsure = why => ({ ok: false, unconfirmed: true, why });
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const timerSleep = ms => new Promise(r => setTimeout(r, ms));
+  // relay.link() swaps this for a wait timed by its server: a hidden page's own
+  // timers run about once a minute, an answer to a fetch arrives when it is sent.
+  let sleep = timerSleep;
 
   const room = () => document.querySelector(SEL.room);
   const chatId = () => { const r = room(); return r ? r.getAttribute('data-mid') : null; };
@@ -80,9 +89,20 @@ globalThis.LINESEND = (() => {
     }));
   }
 
-  // LINEX trims what it reads, so compare against the trimmed text.
-  const countOutgoing = text =>
-    LINEX.collect().filter(r => r.direction === 'outgoing' && r.text === text.trim()).length;
+  // LINEX trims what it reads, drops zero-width characters (an emoji sequence
+  // holds a joiner) and swaps emoji images for their alt text, so a bubble's text
+  // is compared after the same clean-up, never byte for byte.
+  const norm = s => String(s == null ? '' : s).normalize('NFC')
+    .replace(/[\u200B\u200C\u200D\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
+  const outgoing = rows => rows.filter(r => r.direction === 'outgoing' && r.selectId);
+  // A bubble that turns up after typing only counts as the one just sent when it
+  // is not older than what was newest then: an old message with the same text can
+  // scroll into view while we wait. The slack is for two clocks (LINE's and this
+  // machine's) that need not agree to the second.
+  const CLOCK_SLACK_MS = 120000;
+  // A go from the relay is for now. Handled this much later - a debugger pause, a
+  // frozen tab, the machine asleep - whoever gave it has stopped waiting.
+  const GO_FRESH_MS = 5000;
 
   // Refuses unless the header shows `name` and, when `chat` is given, the open
   // chat is that exact chat id (two contacts can share a display name).
@@ -105,7 +125,13 @@ globalThis.LINESEND = (() => {
     if (bad) return bad;
     // Never overwrite something the user is typing.
     if (!isEmpty(box())) return refuse('message box is not empty (the user may be typing)');
-    pending = { text, name, before: countOutgoing(text), committed: false };
+    // The outgoing bubbles already there, by id, which chat they are in, and how
+    // new the newest message is: verify() looks for a later one in that same chat.
+    const rows = LINEX.collect();
+    pending = {
+      text, name, chat: chatId(), before: new Set(outgoing(rows).map(r => r.selectId)),
+      newest: Math.max(0, ...rows.map(r => r.ts || 0)), committed: false, handled: false,
+    };
     setValue(text);
     return { ok: true, staged: text, header: header() };
   }
@@ -123,14 +149,24 @@ globalThis.LINESEND = (() => {
     b.ta.dispatchEvent(ev);
     pending.committed = true;
     // handled === true means the app took the Enter (it calls preventDefault).
+    pending.handled = ev.defaultPrevented;
     return { ok: true, dispatched: true, handled: ev.defaultPrevented };
   }
 
   // ok is the bubble alone: the user may start typing the moment it lands.
   function verify() {
     if (!pending || !pending.committed) return { ok: false, why: 'nothing committed' };
-    const sent = countOutgoing(pending.text) > pending.before;
-    return { ok: sent, sent, boxEmpty: isEmpty(box()), text: pending.text };
+    // Another chat is open now: its bubbles say nothing about the one typed in.
+    if (chatId() !== pending.chat) {
+      return { ok: false, sent: false, moved: true, text: pending.text, why: 'another chat is open now' };
+    }
+    const fresh = outgoing(LINEX.collect()).filter(r =>
+      !pending.before.has(r.selectId) && (r.ts || 0) >= pending.newest - CLOCK_SLACK_MS);
+    const sent = fresh.some(r => norm(r.text) === norm(pending.text));
+    const out = { ok: sent, sent, boxEmpty: isEmpty(box()), text: pending.text };
+    // A new bubble that is not this text (typed on the phone, say): the caller judges.
+    if (!sent && fresh.length) out.others = fresh.map(r => r.text);
+    return out;
   }
 
   function clear() {
@@ -143,12 +179,36 @@ globalThis.LINESEND = (() => {
     return Object.assign({ ok: true }, status());
   }
 
-  async function send(text, name, { chat, settleMs = 300, timeoutMs = 5000 } = {}) {
+  // beforeCommit: an async function asked right before Enter. Unless it resolves
+  // to true or { go: true }, nothing is sent ({ why } becomes the reason). The
+  // relay uses it to ask its server whether the reply is still wanted.
+  async function send(text, name, { chat, settleMs = 300, timeoutMs = 5000, beforeCommit, goFreshMs = GO_FRESH_MS } = {}) {
     let entered = false;   // has the Enter gone out? decides notSent vs unconfirmed
     try {
       const s = stage(text, name, chat);
       if (!s.ok) return s;
       await sleep(settleMs);
+      if (beforeCommit) {
+        let go = false, why = 'called off before Enter';
+        const asked = Date.now();
+        try {
+          const g = await beforeCommit();
+          go = g === true || !!(g && g.go);
+          if (g && g.why) why = g.why;
+        } catch (e) {
+          why = 'no answer before Enter: ' + (e && e.message || e);
+        }
+        if (go && Date.now() - asked > goFreshMs) {
+          go = false;
+          why = 'the go came back after ' + Math.round((Date.now() - asked) / 1000) + ' s, too late to act on; not sent';
+        }
+        if (!go) {
+          // Clear only our own text: the user may have typed meanwhile.
+          if (holds(box(), text)) setValue('');
+          pending = null;
+          return refuse(why);
+        }
+      }
       const c = commit(text, name, chat);
       if (!c.ok) {
         // Clear only our own text: the user may have typed during the settle.
@@ -157,12 +217,26 @@ globalThis.LINESEND = (() => {
         return c;
       }
       entered = true;
-      for (let waited = 0; waited < timeoutMs; waited += 250) {
+      // On the clock: a hidden page's timers run about once a minute, and a
+      // count of sleeps would keep this waiting for twenty.
+      for (const until = Date.now() + timeoutMs; ;) {
         await sleep(250);
-        if (verify().sent) { pending = null; return { ok: true }; }
+        const v = verify();
+        if (v.sent) { pending = null; return { ok: true }; }
+        if (v.moved) {
+          pending = null;
+          return unsure('another chat was opened right after Enter - read ' + JSON.stringify(name) +
+                        ' before sending it again');
+        }
+        if (Date.now() >= until) break;
       }
       pending = null;
       if (holds(box(), text)) {
+        // The app called preventDefault, so it may still be sending: leave the
+        // text where it is and say so, instead of claiming nothing went out.
+        if (c.handled) {
+          return unsure('the app took the Enter but the text is still in the box - read the chat before sending it again');
+        }
         setValue('');
         return refuse('Enter was not taken; the staged text was cleared');
       }
@@ -242,10 +316,11 @@ globalThis.LINESEND = (() => {
         if (Date.now() - t0 > 4000) return refuse('clicked ' + JSON.stringify(t.name) + ' but the chat did not open');
         await sleep(100);
       }
-      // Let the message list settle: the same row count on two looks.
-      for (let n = -1, i = 0; i < 12; i++) {
+      // Let the message list settle: the same row count on two looks (on the
+      // clock, like send(): a hidden page's sleeps can take a minute each).
+      for (let n = -1, until = Date.now() + 2000; ;) {
         const m = rowsNow().length;
-        if (m === n) break;
+        if (m === n || Date.now() >= until) break;
         n = m;
         await sleep(150);
       }
@@ -262,7 +337,7 @@ globalThis.LINESEND = (() => {
     }
 
     // Queue the open chat's new incoming messages for the relay.
-    function collectNew(t) {
+    function collectNew(t, outbox = st.outbox) {
       // In a 1:1 chat (a U... id) every incoming message is the contact's own, so
       // a row from anyone else means the list is not this chat's yet.
       const oneToOne = /^U/i.test(t.chat);
@@ -273,13 +348,26 @@ globalThis.LINESEND = (() => {
         // Newer than everything present at start: history loaded later by
         // scrolling is older, and is never forwarded.
         if (r.direction === 'incoming' && (r.ts || 0) > t.startTs) {
-          st.outbox.push({
-            chat: t.name, selectId: r.selectId, time: r.displayTime, sender: r.sender, kind: r.kind,
-            text: r.text, replyTo: r.replyTo || null,
+          outbox.push({
+            chat: t.name, chatId: t.chat, selectId: r.selectId, ts: r.ts, time: r.displayTime,
+            sender: r.sender, kind: r.kind, text: r.text, replyTo: r.replyTo || null,
             sticker: r.sticker ? r.sticker.url : null,
           });
         }
       }
+    }
+
+    // Each name must be exactly one row of the visible chat list.
+    function byName(names) {
+      if (new Set(names).size !== names.length) return { why: 'names must be distinct' };
+      const items = listItems(), targets = [];
+      for (const n of names) {
+        const hits = items.filter(i => i.name === n);
+        if (hits.length > 1) return { why: 'more than one chat in the list is named ' + JSON.stringify(n) };
+        if (!hits.length) return { why: JSON.stringify(n) + ' is not in the visible chat list - pin it to the top' };
+        targets.push({ name: n, chat: hits[0].chat });
+      }
+      return { targets };
     }
 
     async function tick() {
@@ -379,16 +467,12 @@ globalThis.LINESEND = (() => {
         if (!chatId()) return { ok: false, why: 'no chat id (chatroom data-mid) - has the markup changed?' };
         targets.push({ name, chat: chatId() });
       } else {
-        if (new Set(wanted).size !== wanted.length) return { ok: false, why: 'names must be distinct' };
-        const items = listItems();
-        for (const n of wanted) {
-          const hits = items.filter(i => i.name === n);
-          if (hits.length > 1) return { ok: false, why: 'more than one chat in the list is named ' + JSON.stringify(n) };
-          if (!hits.length) return { ok: false, why: JSON.stringify(n) + ' is not in the visible chat list - pin it to the top' };
-          targets.push({ name: n, chat: hits[0].chat });
-        }
+        const found = byName(wanted);
+        if (found.why) return { ok: false, why: found.why };
+        targets.push(...found.targets);
       }
       stop();
+      sleep = timerSleep;   // relay.py has no /wait to time them
       const c = cfg = { url, token, follow, targets, ready: false, stopped: false, starting: null };
       st.results = new Map();
       st.inflight = new Set();
@@ -414,11 +498,477 @@ globalThis.LINESEND = (() => {
       return { ok: true, starting: wanted };
     }
 
+    // ---- link mode: the page side of the MCP hub (mcp/hub.mjs) ----
+    //
+    // link({ url, token, build })   ask the hub for work; follow no chat yet.
+    //
+    // The hub hands over one item at a time: a message to send, or one of four
+    // ops (status, read, follow, unfollow). Nothing else can be asked of the
+    // page, and nothing that arrives is run as code. Before Enter the page asks
+    // the hub once more (POST /commit), so a message whose caller has given up
+    // is never sent late.
+    //
+    // Kept for as long as this paste of the script lives: which ids were handled,
+    // and the reports the hub has not taken yet. (A new paste starts empty; the
+    // hub never offers an id twice, so that is not what keeps a message single.)
+    // The followed chats are the hub's to decide: each answer says which they
+    // are, and the page drops whatever the hub does not list - all of them when
+    // another hub answers (a new epoch), which never asked for any.
+    let link = null;
+    const ln = {
+      results: new Map(), inflight: new Set(), reports: [], inbox: [],
+      follow: { targets: [] }, rounds: 0, lastError: null, followError: null,
+    };
+    const newId = () => (globalThis.crypto && globalThis.crypto.randomUUID
+      ? globalThis.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+
+    // The token goes in a header: a URL shows up in the page's resource timings.
+    const hub = (L, method, path, body, query) =>
+      fetch(L.url + path + '?i=' + L.instance + '&l=' + L.linkedAt + '&b=' + encodeURIComponent(L.build) + (query || ''), {
+        method,
+        headers: Object.assign({ 'x-line-bridge-token': L.token }, body === undefined ? null : { 'content-type': 'application/json' }),
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }).then(r => {
+        if (!r.ok) throw Object.assign(new Error(path + ' HTTP ' + r.status), { status: r.status });
+        return r.json();
+      });
+
+    const focused = L => { try { return !!L.hasFocus(); } catch (e) { return false; } };
+    const here = () => (chatId() ? { name: header(), chat: chatId() } : null);
+    // A chat never opened since the page loaded shows no messages when a script
+    // opens it in a hidden window: a bubble sent there could not be seen.
+    const loaded = t => rowsNow().some(r => r.selectId) || !itemText(itemOf(t.chat), SEL.itemDesc);
+    // The messages in the list right now, by id. After a switch the list must
+    // stop showing any of the ones that were there before: until then it is
+    // still the other chat's, whatever the header says. (Whether LINE's list can
+    // lag its header has not been seen; this is so that it could not matter.)
+    const idsNow = () => new Set(rowsNow().map(r => r.selectId).filter(Boolean));
+    async function caughtUp(before) {
+      for (const until = Date.now() + 2000; rowsNow().some(r => r.selectId && before.has(r.selectId));) {
+        if (Date.now() >= until) return false;
+        await sleep(100);
+      }
+      return true;
+    }
+    const LAGGING = name => 'after switching to ' + JSON.stringify(name) + ' the message list still shows the chat that was open before; nothing was read or typed';
+
+    // Open a chat for the hub. On top of open()'s own checks: not while the user
+    // is in the LINE window (their next keystroke would land in the chat we
+    // switch to), only a row whose name still goes with the id, and only a chat
+    // whose own messages are really there.
+    async function openFor(L, t) {
+      if (L.stale && chatId() !== L.stale.chat) L.stale = null;   // the window has moved on since
+      if (!isOpen(t)) {
+        if (focused(L)) {
+          return refuse('the LINE window has the keyboard focus (the user is in it); not switching to ' + JSON.stringify(t.name));
+        }
+        const row = listItems().find(i => i.chat === t.chat);
+        if (row && row.name !== t.name) {
+          return refuse('the chat ' + t.chat + ' is named ' + JSON.stringify(row.name) + ', not ' + JSON.stringify(t.name));
+        }
+        const was = chatId(), before = idsNow();
+        const o = await open(t);
+        // Whichever chat the click left the window on is ours to leave again.
+        if (chatId() !== was) L.opened.push(chatId());
+        if (!o.ok) return o;
+        if (!(await caughtUp(before))) {
+          L.stale = { chat: t.chat, ids: before };
+          return refuse(LAGGING(t.name));
+        }
+      } else if (L.stale && L.stale.chat === t.chat) {
+        // We came here by a switch whose list had not caught up: look again.
+        if (rowsNow().some(r => r.selectId && L.stale.ids.has(r.selectId))) return refuse(LAGGING(t.name));
+        L.stale = null;
+      }
+      if (!loaded(t)) {
+        return Object.assign(refuse(JSON.stringify(t.name) + ' shows no messages although its preview is not empty: ' +
+          'open it once by hand with the LINE window visible, then try again'), { notLoaded: true });
+      }
+      return { ok: true };
+    }
+
+    // After a visit to a followed chat: what arrived there is forwarded, and its
+    // row is noted, so the visit itself does not look like news.
+    function noteVisit(t) {
+      const f = ln.follow.targets.find(x => x.chat === t.chat);
+      if (!f || !isOpen(f)) return;
+      collectNew(f, ln.inbox);
+      f.snap = itemSnap(itemOf(f.chat));
+    }
+
+    // Should the window go back to the chat the user had open? null: it is
+    // there. Only away from a chat this item opened itself - not when the user
+    // has moved on, is typing, or is in the window.
+    function wayBack(L, from) {
+      const now = chatId();
+      if (!from || now === from.chat) return null;
+      if (!L.opened.includes(now)) return { go: false, why: 'another chat was opened meanwhile' };
+      let b = null;
+      try { b = box(); } catch (e) { /* no box: nothing typed */ }
+      if (b && !isEmpty(b)) return { go: false, why: 'the message box is not empty' };
+      if (focused(L)) return { go: false, why: 'the LINE window has the keyboard focus' };
+      if (!itemOf(from.chat)) return { go: false, why: JSON.stringify(from.name) + ' is no longer in the visible chat list' };
+      return { go: true };
+    }
+
+    // Which chat an op means: by id when given, else by name among the rows in
+    // view - and never a guess between two chats of the same name.
+    function findChat(a) {
+      const name = typeof a.chat === 'string' && a.chat ? a.chat : null;
+      const id = typeof a.chatId === 'string' && a.chatId ? a.chatId : null;
+      const cur = here();
+      if (!name && !id) return cur ? { t: cur } : { why: 'no chat is open in the LINE window - name one' };
+      const named = (real, where) => 'the chat ' + id + where + ' is named ' + JSON.stringify(real) + ', not ' + JSON.stringify(name);
+      if (id) {
+        if (cur && cur.chat === id) return !name || cur.name === name ? { t: cur } : { why: named(cur.name, ' (the open one)') };
+        const row = listItems().find(i => i.chat === id);
+        if (!row) return { why: 'the chat ' + id + ' is not in the visible chat list - pin it to the top, or open it by hand' };
+        return !name || row.name === name ? { t: { name: row.name, chat: id } } : { why: named(row.name, '') };
+      }
+      const hits = listItems().filter(i => i.name === name).map(i => ({ name, chat: i.chat }));
+      if (cur && cur.name === name && !hits.some(h => h.chat === cur.chat)) hits.push(cur);
+      if (hits.length > 1) {
+        return { why: hits.length + ' chats are named ' + JSON.stringify(name) + ' - say which by its chat id', candidates: hits.map(h => h.chat) };
+      }
+      if (hits.length) return { t: hits[0] };
+      return { why: JSON.stringify(name) + ' is not in the visible chat list - pin it to the top, or open it by hand' };
+    }
+
+    function opStatus(L) {
+      let b = null;
+      try { b = box(); } catch (e) { /* no chat open */ }
+      // No draft text and no previews: only what is needed to pick a chat.
+      return {
+        ok: true,
+        value: {
+          build: L.build, instance: L.instance, header: header(), chat: chatId() || null, boxEmpty: b ? isEmpty(b) : null,
+          hidden: document.visibilityState === 'hidden', focused: focused(L),
+          follow: ln.follow.targets.map(t => ({ name: t.name, chat: t.chat, open: isOpen(t), missing: !!t.missing })),
+          followError: ln.followError, lastError: ln.lastError, unreported: ln.reports.length,
+          list: listItems().map(i => ({
+            name: i.name, chat: i.chat, current: i.el.getAttribute('aria-current') === 'true',
+            time: itemTime(i.el), unread: itemText(i.el, SEL.itemUnread) || null,
+          })),
+        },
+      };
+    }
+
+    async function opRead(L, a) {
+      const found = findChat(a);
+      if (!found.t) return { ok: false, why: found.why, value: found.candidates ? { candidates: found.candidates } : {} };
+      const t = found.t;
+      const o = await openFor(L, t);
+      // Never an empty list for a chat that did not load: it would read as "nothing was said".
+      if (!o.ok) return { ok: false, why: o.why, value: o.notLoaded ? { notLoaded: true } : {} };
+      const value = { header: t.name, chat: t.chat };
+      if (a.history === true) {
+        // Loading older messages scrolls the chat; a hidden page would take a minute per step.
+        if (document.visibilityState === 'hidden') {
+          return { ok: false, why: 'older messages can only be loaded while the LINE window is visible (it is hidden or minimised)', value: { hidden: true } };
+        }
+        const all = await LINEX.loadAll({ copy: false, deadlineMs: Math.min(Math.max(Number(a.deadlineMs) || 20000, 1000), 40000), sleep });
+        // The load takes seconds, in a window the user can see: what it read is
+        // this chat's only if this chat is still the one open.
+        if (!isOpen(t)) return { ok: false, why: 'another chat was opened while older messages were loading; nothing is returned', value: {} };
+        value.messages = all.messages;
+        if (all.truncated) value.truncated = true;
+      } else {
+        value.messages = LINEX.collect();
+      }
+      noteVisit(t);
+      return { ok: true, value };
+    }
+
+    async function opFollow(L, a) {
+      const names = a.names;
+      if (!Array.isArray(names) || !names.length || names.some(n => typeof n !== 'string' || !n)) {
+        return { ok: false, why: 'follow needs names: the chats to follow, as they appear in the chat list' };
+      }
+      const found = byName(names);
+      if (found.why) return { ok: false, why: found.why };
+      // Visit each once: a chat whose messages never loaded is caught now instead
+      // of going quiet later. Nothing takes effect until every chat has passed -
+      // a follow that fails half-way leaves what was followed as it was.
+      const arrived = [];
+      for (const t of found.targets) {
+        if (L.stopped) return { ok: false, why: 'stopped while starting' };
+        const o = await openFor(L, t);
+        if (!o.ok) return { ok: false, why: o.why };
+        const rows = rowsNow();
+        const prev = ln.follow.targets.find(x => x.chat === t.chat);
+        if (prev) {
+          // Followed right up to now: go on from where it stands, so a message
+          // that came in since the last look is forwarded, not taken as old.
+          t.startTs = prev.startTs;
+          t.seen = new Set(prev.seen);
+          collectNew(t, arrived);
+          t.snap = itemSnap(itemOf(t.chat));
+        } else {
+          // Newly followed (also after a restart or a new paste): what is there
+          // now is not forwarded. How much of it still waits for an answer is
+          // said instead, for the caller to read and decide.
+          baseline(t);
+        }
+        t.unanswered = unanswered(rows);
+      }
+      ln.follow = { targets: found.targets };   // the ids handled so far stay as they are
+      ln.inbox.push(...arrived);
+      ln.followError = null;
+      L.toldEmpty = false;
+      return {
+        ok: true,
+        value: { chats: found.targets.map(x => ({ name: x.name, chat: x.chat, ignored: x.seen.size, unanswered: x.unanswered })) },
+      };
+    }
+
+    // The incoming messages after the last outgoing one.
+    function unanswered(rows) {
+      let n = 0;
+      for (const r of rows) {
+        if (r.direction === 'outgoing') n = 0;
+        else if (r.direction === 'incoming' && r.selectId) n++;
+      }
+      return n;
+    }
+
+    function dropFollow() {
+      ln.follow = { targets: [] };
+      ln.inbox = [];
+      ln.followError = null;
+    }
+
+    function opUnfollow() {
+      dropFollow();
+      return { ok: true, value: { chats: [] } };
+    }
+
+    // A Map, not an object: "constructor" and the like are not ops.
+    const OPS = new Map([['status', opStatus], ['read', opRead], ['follow', opFollow], ['unfollow', opUnfollow]]);
+
+    async function runOp(L, item) {
+      const answer = r => ({
+        report: { path: '/result', body: Object.assign({ id: item.id, ok: !!r.ok, value: r.value || {} }, r.ok ? null : { why: r.why }) },
+      });
+      const fn = OPS.get(item.op);
+      if (!fn) return answer({ ok: false, why: 'unknown op ' + JSON.stringify(item.op) });
+      if (item.runBy && Date.now() > item.runBy) return answer({ ok: false, why: 'picked up too late; not run', value: { expired: true } });
+      return answer(await fn(L, item.args && typeof item.args === 'object' ? item.args : {}));
+    }
+
+    async function runSend(L, item) {
+      // stay: a reply leaves the window on the followed chat; only a direct send goes back.
+      const answer = res => ({
+        report: { path: '/sent', body: Object.assign({ id: item.id, chat: item.chat, chatId: item.chatId, text: item.text }, res) },
+        stay: !item.direct,
+      });
+      if (typeof item.chatId !== 'string' || !item.chatId || typeof item.chat !== 'string' || !item.chat) {
+        return answer(refuse('a message needs the chat name and the chat id'));
+      }
+      const followed = ln.follow.targets.find(x => x.chat === item.chatId && x.name === item.chat);
+      // A reply (not direct) only goes to a chat that is followed; a direct send
+      // names its chat by id.
+      if (!item.direct && !followed) {
+        return answer(refuse('reply is for ' + JSON.stringify(item.chat) + ', the relay follows ' +
+                             JSON.stringify(ln.follow.targets.map(x => x.name))));
+      }
+      const t = followed || { name: item.chat, chat: item.chatId };
+      let res;
+      try {
+        res = await openFor(L, t);
+        if (res.ok && followed) collectNew(followed, ln.inbox);   // what arrived there meanwhile
+      } catch (e) {
+        res = refuse('exception before typing: ' + (e && e.message || e));
+      }
+      if (res.ok) {
+        // send() never throws. The hub is asked right before Enter.
+        res = await send(item.text, t.name, { chat: t.chat, beforeCommit: () => hub(L, 'POST', '/commit', { id: item.id }) });
+        try { noteVisit(t); } catch (e) { /* the result stands */ }
+      }
+      return answer(res);
+    }
+
+    // Reports wait here until the hub has them; a hub that was away gets them later.
+    async function flush(L) {
+      while (ln.reports.length) {
+        const r = ln.reports[0];
+        try {
+          await hub(L, 'POST', r.path, r.body);
+        } catch (e) {
+          // Refused for good (a newer paste owns the log, a body the hub will not
+          // take): drop it. A hub that is away, or a refused token: keep it.
+          if (!(e.status >= 400 && e.status < 500 && e.status !== 403)) throw e;
+        }
+        ln.reports.shift();
+      }
+    }
+
+    async function runItem(L, item) {
+      if (!item || typeof item.id !== 'string') return;
+      if (ln.results.has(item.id)) {
+        // Offered again: say again what happened, never do it again.
+        ln.reports.push(ln.results.get(item.id));
+        return flush(L);
+      }
+      if (ln.inflight.has(item.id)) return;
+      ln.inflight.add(item.id);
+      const op = item.kind === 'op';
+      const from = here();   // where the user was
+      L.opened = [];         // the chats this item switches to
+      let out;
+      try {
+        out = op ? await runOp(L, item) : await runSend(L, item);
+      } catch (e) {
+        // Always an answer: an id left in "inflight" would never be reported.
+        const why = 'exception: ' + (e && e.message || e);
+        out = { report: op ? { path: '/result', body: { id: item.id, ok: false, value: {}, why } }
+          : { path: '/sent', body: Object.assign({ id: item.id, chat: item.chat, chatId: item.chatId, text: item.text }, unsure(why)) } };
+      } finally {
+        ln.inflight.delete(item.id);
+      }
+      const back = out.stay ? null : wayBack(L, from);
+      if (back && !back.go) Object.assign(op ? out.report.body.value : out.report.body, { restored: false, restoreWhy: back.why });
+      // A send's report is kept whole, to be given again; an op's answer can be a
+      // whole chat, so only the fact that it ran.
+      ln.results.set(item.id, op ? { path: '/result', body: { id: item.id, ok: false, value: {}, why: 'this op already ran' } } : out.report);
+      if (ln.results.size > 300) ln.results.delete(ln.results.keys().next().value);
+      ln.reports.push(out.report);
+      // The result first, then the way back: a slow switch must not delay it.
+      try { await flush(L); } catch (e) { ln.lastError = String(e && e.message || e); }
+      if (back && back.go) {
+        // Asked again, right before the click: the report took a moment, and the
+        // user may have come back to the window or opened another chat.
+        const still = wayBack(L, from);
+        let o = still && !still.go ? refuse(still.why) : null;
+        if (still && still.go) {
+          const before = idsNow();
+          try { o = await open(from); } catch (e) { o = refuse(String(e && e.message || e)); }
+          // Nothing is read or typed here now; but the next item for this chat
+          // must not take a list that has not caught up for this chat's own.
+          if (o.ok && !(await caughtUp(before))) L.stale = { chat: from.chat, ids: before };
+        }
+        if (o && !o.ok) {
+          ln.reports.push({ path: '/log', body: { event: 'not-restored', left: (here() || {}).name || null, wanted: from.name, why: o.why } });
+        }
+      }
+    }
+
+    // The hub says which chats are followed; the page never follows more than
+    // that. A hub that changed (a new epoch) never asked for any.
+    function syncFollow(L, res) {
+      const changed = L.epoch !== null && res.epoch !== L.epoch;
+      L.epoch = res.epoch;
+      const listed = Array.isArray(res.follow) ? res.follow : null;
+      if (!ln.follow.targets.length) {
+        // The hub lists chats this page does not follow (a follow that an older
+        // paste finished, say): tell it once, so it stops saying they are.
+        if (listed && listed.length && !L.toldEmpty) {
+          L.toldEmpty = true;
+          ln.reports.push({ path: '/log', body: { event: 'unfollowed', why: 'this page follows nothing' } });
+        }
+        return;
+      }
+      const ids = list => list.slice().sort().join(' ');
+      if (!changed && (!listed || ids(listed) === ids(ln.follow.targets.map(t => t.chat)))) return;
+      // Nothing is kept for a later follow: one asked again starts from what is
+      // there then, and says how much of it is unanswered.
+      dropFollow();
+      ln.reports.push({
+        path: '/log',
+        body: { event: 'unfollowed', why: changed ? 'the relay server was restarted' : 'the relay no longer follows these chats' },
+      });
+    }
+
+    // Forward what came in to the followed chats, opening one whose row changed.
+    async function followPass(L) {
+      const f = ln.follow;
+      let problem = null;
+      for (const t of f.targets) {
+        if (L.stopped || ln.follow !== f) break;
+        const el = itemOf(t.chat);
+        t.missing = !el;
+        if (!isOpen(t)) {
+          if (!el || itemSnap(el) === t.snap) continue;
+          const o = await openFor(L, t);
+          if (!o.ok) { problem = o.why; continue; }   // again next round
+        }
+        collectNew(t, ln.inbox);
+        t.snap = itemSnap(itemOf(t.chat));
+      }
+      ln.followError = problem;
+      while (ln.inbox.length) { await hub(L, 'POST', '/in', ln.inbox[0]); ln.inbox.shift(); }
+    }
+
+    // One round: hand over reports, ask for work, do it, then look at the
+    // followed chats.
+    async function pump() {
+      const L = link;
+      if (!L || L.stopped || L.busy) return;
+      L.busy = true;
+      ln.rounds++;
+      try {
+        await flush(L);
+        const res = await hub(L, 'GET', '/poll', undefined, '&wait=' + L.pollMs);
+        L.hubOk = true;
+        syncFollow(L, res);
+        for (const item of res.items || []) {
+          if (L.stopped) break;
+          await runItem(L, item);
+        }
+        // Only now, with an answer from the hub just in and its list of followed
+        // chats applied: no chat is opened (and marked read) for nobody.
+        if (!L.stopped) await followPass(L);
+        ln.lastError = null;
+      } catch (e) {
+        L.hubOk = false;
+        ln.lastError = String(e && e.message || e);
+        if (e && e.status === 409) unlink('a newer paste of the script has taken over');
+        if (e && e.status === 403) unlink('the hub refused the token - run line_setup and paste again');
+      } finally {
+        L.busy = false;
+      }
+    }
+
+    async function run(L) {
+      while (!L.stopped && link === L) {
+        const from = Date.now();
+        await pump();
+        if (L.stopped) break;
+        // The hub paces the loop by holding each poll. When it is away, wait on
+        // a timer; when it answered at once with nothing to do, do not spin.
+        if (!L.hubOk) await timerSleep(1500);
+        else if (Date.now() - from < 50) await sleep(200);
+      }
+    }
+
+    function unlink(why) {
+      if (!link) return;
+      link.stopped = true;
+      if (why) ln.lastError = why;
+    }
+
+    function linkTo({ url = 'http://127.0.0.1:38766', token, build = '', pollMs = 1500, auto = true, hasFocus } = {}) {
+      if (!token) return { ok: false, why: 'relay.link needs { token } - line_setup puts the whole line on the clipboard' };
+      stop();   // the older relay, and an earlier link
+      const L = link = {
+        url, token, build: String(build), pollMs, instance: newId(), linkedAt: Date.now(), epoch: null,
+        hasFocus: hasFocus || (() => document.hasFocus()), opened: [], stale: null, toldEmpty: false,
+        hubOk: false, busy: false, stopped: false, starting: null,
+      };
+      dropFollow();   // a new link follows nothing yet
+      ln.lastError = null;
+      sleep = ms => hub(L, 'GET', '/wait', undefined, '&ms=' + ms).catch(() => timerSleep(ms));
+      L.starting = hub(L, 'POST', '/log', { event: 'linked', header: header(), chat: chatId() || null })
+        .then(r => { L.epoch = r.epoch; L.hubOk = true; }, e => { ln.lastError = String(e && e.message || e); })
+        .then(() => { if (auto) run(L); });
+      return { ok: true, linking: true, instance: L.instance };
+    }
+
     // Also stops a tick that is mid-batch: it sends nothing after the current reply.
     function stop() {
       if (timer) clearInterval(timer);
       timer = null;
       if (cfg) cfg.stopped = true;
+      unlink();
       return { stopped: true, ticks: st.ticks };
     }
 
@@ -428,17 +978,22 @@ globalThis.LINESEND = (() => {
         chats: cfg ? cfg.targets.map(t => ({ name: t.name, chat: t.chat, open: isOpen(t), missing: !!t.missing })) : [],
         header: header(), openChat: chatId(), ticks: st.ticks, waitingToForward: st.outbox.length,
         lastError: st.lastError,
+        link: link ? {
+          linked: !link.stopped, instance: link.instance, url: link.url, build: link.build, epoch: link.epoch,
+          hubOk: link.hubOk, rounds: ln.rounds, unreported: ln.reports.length, lastError: ln.lastError,
+          follow: ln.follow.targets.map(t => ({ name: t.name, chat: t.chat, open: isOpen(t), missing: !!t.missing })),
+        } : null,
       };
     }
 
-    // Resolves once a start() has finished starting (follow mode visits each chat first).
-    const ready = () => Promise.resolve(cfg && cfg.starting).then(status);
+    // Resolves once a start() or link() has finished starting (follow mode visits each chat first).
+    const ready = () => Promise.resolve(cfg && cfg.starting).then(() => link && link.starting).then(status);
 
-    return { start, stop, status, ready, tick };
+    return { start, stop, status, ready, tick, link: linkTo, pump };
   })();
 
   return { status, stage, commit, verify, clear, send, relay, header, chatId, chatItem, SEL };
 })();
 
-console.log('LINESEND ready:  stage / commit / verify / send / relay.start');
+console.log('LINESEND ready:  stage / commit / verify / send / relay.link / relay.start');
 LINESEND;

@@ -1,6 +1,7 @@
 # Gotchas
 
-Every item here was hit for real. Grouped by where it bites.
+Every item here was hit for real - or, where it says "caught in review", found
+before it could be. Grouped by where it bites.
 
 ## Contents
 
@@ -8,6 +9,7 @@ Every item here was hit for real. Grouped by where it bites.
 - [Finding and opening chats](#finding-and-opening-chats)
 - [Window handling](#window-handling)
 - [Locked session](#locked-session)
+- [MCP hub and tools](#mcp-hub-and-tools)
 - [DevTools bridge](#devtools-bridge)
 - [Encoding](#encoding)
 - [Coordinates and DPI](#coordinates-and-dpi)
@@ -99,9 +101,50 @@ When the Windows session is locked the foreground window belongs to `LockApp`
 | `PostMessage` input to LINE (Qt) | works |
 | `SetForegroundWindow`, `AttachThreadInput` | fail |
 | `SendKeys`, real mouse, the DevTools bridge | cannot work |
+| The clipboard (`Get-Clipboard`, `Set-Clipboard`, `Clipboard.ContainsText`) | fails: "Requested Clipboard operation did not succeed" (2026-10-01) |
 
 `Test-SessionLocked` checks this. Several "the paste did not land" failures turned
-out to be nothing but a locked screen.
+out to be nothing but a locked screen. A quick tell without the skill's script:
+`Get-Process LogonUI` finds a process while the lock screen is up.
+
+**`line_setup` fails while locked**, since it writes the clipboard - and the user
+could not paste anyway. It says so in plain words: PowerShell's own message arrives
+in the ANSI code page and read as noise, so the server maps it to an exit code.
+
+**A script that restores the clipboard must stop at the first clipboard error.**
+A check that read "has text: no" from a failed call went on to clear the clipboard
+"to restore it"; only the lock made that fail too.
+
+## MCP hub and tools
+
+**A pooled HTTP connection goes stale when the hub restarts.** Node's `fetch` keeps
+connections alive; after a hub was closed and another took the port, the next
+request on a pooled one was reset (`ECONNRESET`). For a send that would be a
+failure the caller cannot tell from a lost message. `server.mjs` and the tests open
+one connection per request (`http.request` with `agent: false`).
+
+**An event has a kind, and so has a message.** An `IN` event flattened into
+`{ kind, ...data }` came out with `kind: "text"`: the message's own kind had
+overwritten the event's. Events are `{ seq, at, kind, data }`, in the hub and in
+`line_events`; only the log line is flat.
+
+**Started through a directory junction, the server exited at once.** The check
+"was this file run, or imported?" compared the path given with the file's real
+path; README installs a skill as a junction, so the two differed. It now compares
+through `realpath`, without case. A lowercase drive letter (`d:\`, as VS Code
+passes it) did not trip it, a junction did.
+
+**The MCP client hands a child process `LOCALAPPDATA`.** `StdioClientTransport`
+passes a default environment when none is given, and on Windows that list includes
+`LOCALAPPDATA` (printed from `getDefaultEnvironment()`, 2026-10-01). Caught in
+review before it bit: a test that only set `process.env` would start the server on
+the user's real directory and port, a linked LINE page one request away. Every test
+passes its own `env`, and `LINE_BRIDGE_TEST=1` makes the server refuse the real
+port.
+
+**Requiring a package file by its absolute path skips its `exports` map.**
+`require('<abs>/node_modules/@modelcontextprotocol/client/stdio')` is "module not
+found"; `createRequire('<dir>/')('@modelcontextprotocol/client/stdio')` resolves.
 
 ## DevTools bridge
 

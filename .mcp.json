@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "line-bridge": {
+      "command": "node",
+      "args": ["${CLAUDE_PROJECT_DIR:-.}/line-bridge/mcp/server.mjs"],
+      "timeout": 110000
+    }
+  }
+}

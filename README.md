@@ -7,6 +7,7 @@
 | [`line-bridge`](line-bridge/SKILL.md) | 讀取、回覆、匯出、即時監看 LINE 聊天(LINE 桌面版 + LINE Chrome 擴充功能) |
 | [`discord-bridge`](discord-bridge/SKILL.md) | 讀取、回覆、即時監看 Discord(瀏覽器上自己已登入的分頁) |
 | [`jobs-104`](jobs-104/SKILL.md) | 搜尋、閱讀 104 人力銀行職缺(直接讀 104 網站用的 JSON,不需登入) |
+| [`marstw-cart`](marstw-cart/SKILL.md) | 戰神 MARS 商品查口味與庫存,在自己的 Chrome 分頁把指定口味加入購物車(不結帳) |
 
 ## 安裝
 

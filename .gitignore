@@ -21,3 +21,8 @@ __pycache__/
 Thumbs.db
 .DS_Store
 .vscode/
+
+# speech-to-text: models (3 GB) and venvs live outside the repo; this catches a
+# fetch_models.py run with the wrong Python
+models/
+venv/

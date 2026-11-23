@@ -1,6 +1,6 @@
 ---
 name: discord-bridge
-description: "Read and reply to Discord through the user's own logged-in Chrome tab, using the Claude in Chrome tools. Use this whenever Discord comes up at all - reading a DM or a server channel, catching up on what someone said, finding who messaged, drafting or sending a reply, quoting a message, or watching a conversation live. Triggers include English requests like 'reply to X on Discord', 'what did X say in #general', 'check my Discord', 'send this to the team channel', and the Traditional Chinese the user actually types: 幫我回 XXX 的 Discord 訊息, 看一下 discord 上 XXX 說了什麼, discord 有人敲我嗎, 幫我在 #頻道 發 XXX, 看一下伺服器的訊息. Also use it for anything about Discord's DOM, message ids, reply quotes, or automating Discord in the browser."
+description: "Read and reply to Discord through the user's own logged-in Chrome tab, using the Claude in Chrome tools. Use this whenever Discord comes up at all - reading a DM or a server channel, catching up on what someone said, finding who messaged, drafting or sending a reply, quoting a message, or watching a conversation live. Triggers include English requests like 'reply to X on Discord', 'what did X say in #general', 'check my Discord', 'send this to the team channel', and equivalents in Traditional Chinese: 幫我回 XXX 的 Discord 訊息, 看一下 discord 上 XXX 說了什麼, discord 有人敲我嗎, 幫我在 #頻道 發 XXX, 看一下伺服器的訊息. Also use it for anything about Discord's DOM, message ids, reply quotes, or automating Discord in the browser."
 ---
 
 # Discord bridge

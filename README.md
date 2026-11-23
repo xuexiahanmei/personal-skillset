@@ -6,8 +6,11 @@
 | --- | --- |
 | [`line-bridge`](line-bridge/SKILL.md) | 讀取、回覆、自動回覆、匯出、即時監看 LINE 聊天(預設用 LINE Chrome 擴充功能,桌面版只在同意後備用) |
 | [`discord-bridge`](discord-bridge/SKILL.md) | 讀取、回覆、即時監看 Discord(瀏覽器上自己已登入的分頁) |
+| [`cloned-voice`](cloned-voice/SKILL.md) | 用複製的聲音把文字念出來(WSL 裡的 VoxCPM2 服務,平靜/爆音兩種語氣) |
+| [`speech-to-text`](speech-to-text/SKILL.md) | 錄音、影片轉逐字稿與字幕,可標出誰在說話,也可只留靠近麥克風的人、濾掉背景聊天(本機 Whisper large-v3 + 說話者分辨,不上傳;執行環境在 `C:\dev-workspace\tools\speech-to-text`) |
 | [`jobs-104`](jobs-104/SKILL.md) | 搜尋、閱讀 104 人力銀行職缺(直接讀 104 網站用的 JSON,不需登入) |
 | [`marstw-cart`](marstw-cart/SKILL.md) | 戰神 MARS 商品查口味與庫存,在自己的 Chrome 分頁把指定口味加入購物車(不結帳) |
+| [`youtube-upload`](youtube-upload/SKILL.md) | 上傳影片到自己的 YouTube 頻道(官方 API,可排程、播放清單、縮圖、斷點續傳),查處理狀態、改標題與公開狀態 |
 
 ## 安裝
 

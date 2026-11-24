@@ -64,6 +64,10 @@ module.exports = function mockLine() {
   // that was open before, under the new chat's header. Not seen in LINE; here so
   // that the page script's wait for the list to catch up can be tested.
   let lag = 0, lagFrom = null, lagUntil = 0;
+  // freeze: the message list goes on showing the chat it shows now (and what
+  // arrives there), whatever is opened, until unfrozen. Not seen in LINE either.
+  let frozen = null;
+  const listedNow = () => (lagFrom && Date.now() < lagUntil ? chats.get(lagFrom) : chats.get(openMid));
 
   // byUser: a real click with the window visible, which is what loads a chat.
   function openChat(mid, { byUser = false } = {}) {
@@ -112,7 +116,7 @@ module.exports = function mockLine() {
     roomEl.setAttribute('data-mid', openMid || '');
     roomEl.querySelector('[class*="chatroomHeader"] span').textContent = c ? c.name : '';
     msgList.innerHTML = '';
-    const shown = lagFrom && Date.now() < lagUntil ? chats.get(lagFrom) : c;   // whose messages the list holds
+    const shown = frozen || listedNow();   // whose messages the list holds
     for (const m of (shown && shown.loaded ? shown.messages : [])) {
       const el = document.createElement('div');
       el.className = 'message-module__message__7odk3';
@@ -152,7 +156,12 @@ module.exports = function mockLine() {
   const box = () => document.querySelector('textarea-ex');
   return {
     window, chats, addChat, addMessage, openChat, render, box,
+    // typeByHand: the box as the user leaves it - it REPLACES what is there ('' empties it).
+    // keystrokes: the user typing on - added to whatever the box holds, as a real key is.
+    // pressEnter: the user's own Enter.
     typeByHand(text) { box().ta.value = text; box().ta.dispatchEvent(new window.Event('input')); },
+    keystrokes(text) { box().ta.value += text; box().ta.dispatchEvent(new window.Event('input')); },
+    pressEnter() { box().ta.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); },
     sentIn: mid => chats.get(mid).messages.filter(m => m.direction === 'outgoing').map(m => m.text),
     get openMid() { return openMid; },
     get mode() { return mode; },
@@ -160,5 +169,6 @@ module.exports = function mockLine() {
     get clock() { return clock; },   // the timestamp of the newest message made so far
     get lag() { return lag; },
     set lag(ms) { lag = ms; if (!ms) { lagFrom = null; lagUntil = 0; render(); } },
+    set freeze(on) { frozen = on ? listedNow() : null; render(); },
   };
 };

@@ -3,14 +3,10 @@
     "allow": [
       "mcp__line-bridge__line_setup",
       "mcp__line-bridge__line_status",
-      "mcp__line-bridge__line_read",
-      "mcp__line-bridge__line_events",
-      "mcp__line-bridge__line_unfollow",
-      "mcp__line-bridge__line_reply"
+      "mcp__line-bridge__line_read"
     ],
     "ask": [
-      "mcp__line-bridge__line_send",
-      "mcp__line-bridge__line_follow"
+      "mcp__line-bridge__line_send"
     ]
   }
 }

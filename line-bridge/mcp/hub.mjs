@@ -281,19 +281,44 @@ function run(server, { dir, port, now, downAfterMs, ownerGoneMs }) {
     return true;
   }
 
+  // ---- the duplicate guard ----
+  // A claim per accepted send of a text to a chat, newest first; `earlier` is the
+  // send that allow_duplicate went past. Each message only ever drops its own.
+  const claimKey = (chatId, text) => chatId + '\n' + norm(text);
+  function dropClaim(key, id) {
+    let node = recent.get(key), newer = null;
+    while (node && node.id !== id) { newer = node; node = node.earlier; }
+    if (!node) return false;
+    if (newer) newer.earlier = node.earlier;
+    else if (node.earlier) recent.set(key, node.earlier);
+    else recent.delete(key);
+    return true;
+  }
+  const hasClaim = (key, id) => { for (let n = recent.get(key); n; n = n.earlier) if (n.id === id) return true; return false; };
+
   // ---- items ----
-  function settle(item, result) {
+  // pageSaid: the result is the page's own report.
+  function settle(item, result, { pageSaid = false } = {}) {
     if (!items.has(item.id)) return;
     clearTimeout(item.timer);
     items.delete(item.id);
-    closed.set(item.id, true);
-    if (closed.size > 2000) closed.delete(closed.keys().next().value);
+    let free = false;
     if (item.kind === 'send') {
-      const key = item.chatId + '\n' + norm(item.text);
-      // A definite notSent frees the text for another try; anything else keeps it.
-      if (result.notSent) { if ((recent.get(key) || {}).id === item.id) recent.delete(key); }
-      if (item.grant && result.notSent) item.grant.remaining++;
-    } else if (item.state === 'delivered' && !item.answered) {
+      // Only a notSent that cannot be wrong frees the text for another try: one
+      // the page reported (it looked at the box), or one for a message the page
+      // never had. When the hub itself gives up on a message the page holds, the
+      // page may have typed it, and the user's own Enter can still send it: the
+      // claim stays until the page says what became of it (a late report), or
+      // for its two minutes.
+      free = !!result.notSent && (pageSaid || item.state === 'queued');
+      if (free) dropClaim(claimKey(item.chatId, item.text), item.id);
+      if (item.grant && free) item.grant.remaining++;
+    }
+    // What a late report needs: the approval to give a reply back to, when it
+    // turns out that nothing went out.
+    closed.set(item.id, item.kind === 'send' && !free && item.grant ? { grant: item.grant } : true);
+    if (closed.size > 2000) closed.delete(closed.keys().next().value);
+    if (item.kind !== 'send' && item.state === 'delivered' && !item.answered) {
       // The page may still be running it: remember which op, for when it answers.
       gone.set(item.id, item.op);
       if (gone.size > 200) gone.delete(gone.keys().next().value);
@@ -426,9 +451,24 @@ function run(server, { dir, port, now, downAfterMs, ownerGoneMs }) {
         return { ok: true };
       }
       events.emit(r.ok ? 'SENT' : 'SENDFAIL', r);
-      settle(it, r);
+      settle(it, r, { pageSaid: true });
     } else {
-      // The hub restarted, or stopped waiting: still the truth about that message.
+      // The hub restarted, or stopped waiting: still the truth about that message,
+      // and what the duplicate guard goes by. Taken back: the claim the hub kept
+      // for it can go. Went out, or may have: it counts against sending it again
+      // - whatever the caller was told meanwhile.
+      if (CHAT_ID.test(r.chatId) && r.text) {
+        const key = claimKey(r.chatId, r.text), at = now();
+        if (r.notSent) {
+          if (dropClaim(key, r.id)) {
+            const c = closed.get(r.id);
+            if (c && c.grant) c.grant.remaining++;
+          }
+        } else if (!hasClaim(key, r.id)) {
+          const head = recent.get(key);
+          recent.set(key, { at, id: r.id, earlier: head && at - head.at < DUP_MS ? head : null });
+        }
+      }
       events.emit(r.ok ? 'SENT' : 'SENDFAIL', Object.assign(r, { late: true }));
     }
     return { ok: true };
@@ -533,14 +573,15 @@ function run(server, { dir, port, now, downAfterMs, ownerGoneMs }) {
     if (known.get(chatId) !== chat) {
       return refuse('this page has not reported a chat ' + JSON.stringify(chat) + ' with id ' + chatId + ' - take both from line_status or line_read');
     }
-    const key = chatId + '\n' + norm(text);
+    const key = claimKey(chatId, text);
     const before = recent.get(key);
     if (before && now() - before.at < DUP_MS && !(direct && body.allowDuplicate === true)) {
       return Object.assign(refuse('the same text was sent to this chat ' + Math.round((now() - before.at) / 1000) +
         ' s ago (or its outcome is not known yet) - read the chat first' + (direct ? '; allow_duplicate sends it anyway' : '')), { duplicate: true });
     }
     if (grant) grant.remaining--;   // taken now, so parallel replies cannot overspend
-    recent.set(key, { at: now(), id });
+    // `earlier`: the send this one was allowed to repeat, should this one end notSent.
+    recent.set(key, { at: now(), id, earlier: before && now() - before.at < DUP_MS ? before : null });
     for (const [k, v] of recent) if (now() - v.at >= DUP_MS) recent.delete(k);
     const item = { id, kind: 'send', chat, chatId, text, direct, grant, owner: String(body.owner || ''), commitBy };
     res.on('close', () => { if (!res.writableEnded) abandon(item); });

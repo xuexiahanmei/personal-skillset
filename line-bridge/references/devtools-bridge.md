@@ -2,10 +2,12 @@
 
 This is how the skill worked before the `line_*` MCP tools, and how it still works
 in a session that does not have them (opened outside this repository, or the
-`line-bridge` server not approved). It reaches the same page scripts through the
-DevTools console: each call takes the keyboard focus for about a second and
-overwrites the clipboard, and it cannot work while the Windows session is locked.
-Use the MCP tools whenever the session has them; say so when it does not.
+`line-bridge` server not approved) - and, for now, the only way to auto-reply or
+to watch for new messages: the tools do not offer following yet (SKILL.md says
+why). It reaches the same page scripts through the DevTools console: each call
+takes the keyboard focus for about a second and overwrites the clipboard, and it
+cannot work while the Windows session is locked. For reading and for one-off
+replies use the MCP tools whenever the session has them; say so when it does not.
 
 `$SkillDir` / `$SKILL_DIR` stand for the absolute path of the skill's directory and
 `$scratch` / `$SCRATCH` for the session scratchpad. They are not environment
@@ -131,7 +133,10 @@ until the user says the console prompt is clear, then `verify()` and read the ch
 For one chat, or several, that the user wants answered as messages arrive. Once
 started it takes no keyboard or focus: the page checks every 1.5 s and talks to a
 relay on `127.0.0.1:38765`, and a Monitor wakes Claude on each event. (The MCP hub
-is another server, on port 38766, with its own directory; the two do not mix.)
+is another server, on port 38766, with its own directory; the two do not mix. In
+the page they exclude each other: `relay.start` stops the tools' link, and
+`relay.link` stops this relay. After this relay has run, the tools need
+`line_setup` and a new paste.)
 
 - **One chat** (`name`): the chat open in the extension. The relay never switches
   chats; while the user has another chat open it waits.

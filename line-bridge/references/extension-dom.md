@@ -258,8 +258,10 @@ relay does not switch while the box holds text).
 
 `relay.link({ url, token, build })` is the page side of the MCP tools. It asks the
 hub for work in a loop and does one item at a time: a message to send, or one of
-four ops - `status`, `read`, `follow`, `unfollow`. The ops live in a `Map`; nothing
-that arrives is run as code, and the URL and token cannot be changed from the hub.
+four ops - `status`, `read`, `follow`, `unfollow` (the last two are only ever asked
+for when the follow tools are switched on: "Following: the second phase" below).
+The ops live in a `Map`; nothing that arrives is run as code, and the URL and
+token cannot be changed from the hub.
 
 ```
 GET  /poll?wait=..   -> { epoch, follow: [chat ids], items: [0 or 1] }   409: a newer paste took over, stop
@@ -279,10 +281,21 @@ only for the LINE extension's origin. It does stay where a paste leaves things -
 the clipboard, Windows' clipboard history if that is on, the DevTools console
 history - until `line_setup` runs again with no page linked, which replaces it.
 
-What keeps a message from going out twice, late or to the wrong chat. Each rule
-has a check in `tests/hub.test.js`, `tests/hub-page.test.js` or `tests/send.js`,
-and on 2026-10-01 each check was shown to fail with its rule taken out (34 rules
-broken one at a time in a copy of the code; all 34 noticed):
+What keeps a message from going out twice, late or to the wrong chat - and from
+being reported as something it was not. The checks are in `tests/hub.test.js`,
+`tests/hub-page.test.js`, `tests/send.js` and `tests/mcp.test.js`. On 2026-10-02,
+73 rules of the hub, the page script and the server were taken out one at a time
+in a copy of the code, and the test file for each was run: 72 failed as they
+should. The 73rd (no time limit on the question before Enter) did not - the test
+waited for an answer that never came, and Node, left with nothing to do, ended
+the file with exit code 0. Every test file now fails when it ends before its last
+check, and that rule is noticed too. On 2026-10-15, after a fourth review, 88
+rules (those 73 and 15 more, among them eight the reviewer had removed unnoticed):
+85 failed at once; the other three were guarded only by a rule that now covers
+them too (the duplicate guard after a hub restart, and the log after a caller
+left), got checks of their own, and are noticed since. This says the rules that
+were tried are guarded; it does not say every rule was tried - the list in
+"Following: the second phase" names removals that still go unnoticed.
 
 - **Ids come from the caller** (a UUID per tool call), and the hub never runs one
   twice. The page also remembers the ids it handled - for as long as that paste
@@ -290,67 +303,121 @@ broken one at a time in a copy of the code; all 34 noticed):
 - **One hand-over.** The hub gives an item to the page once. relay.py leases a
   reply for 60 s and then offers it again - to a freshly pasted page, which would
   send it a second time.
-- **The go before Enter.** The page types, waits 300 ms, and asks `POST /commit`.
-  The hub says go only while the caller still waits, the time limit (75 s from
-  the request) has not passed and, for an auto-reply, its approval still stands;
-  without a go the page takes its text back and reports `notSent`. A go that the
-  page gets to act on more than 5 s after asking (a debugger pause, a frozen tab)
-  is not acted on either. So "timed out before the go" is a definite `notSent`,
-  and only "go, then no report" is `unconfirmed`.
+- **The go before Enter.** The page types, waits 300 ms, and asks `POST /commit`
+  (giving up after 5 s without an answer). The hub says go only while the caller
+  still waits, the time limit (75 s from the request) has not passed and, for an
+  auto-reply, its approval still stands; without a go the page takes its text
+  back and reports `notSent`. A go that the page gets to act on more than 5 s
+  after asking (a debugger pause, a frozen tab) is not acted on either. So "timed
+  out before the go" means the page did not press Enter, and the caller hears
+  `notSent`; "go, then no report" is `unconfirmed`. (The user's own Enter can
+  still send a text the page holds: see the duplicate guard.)
+- **The box decides.** Until Enter the typed text sits in a box the user can
+  reach. Nothing is typed while the LINE window has the keyboard focus - also not
+  into the chat that is open - and that is asked again before the hub is asked
+  and after it answered. From there, only a box that still holds exactly the
+  typed text is the page's to send from or to take back (`notSent`). A box that
+  was emptied or typed into is never `notSent`: the page asks for no go, looks
+  for the bubble - an Enter of the user's may have sent the text - and reports
+  `ok` with a `why`, or `unconfirmed`. Another chat opened meanwhile: the text is
+  taken back if the box now shown holds it, and is `unconfirmed` (it may be left
+  as a draft in the first chat) if not.
 - **Reports are kept.** A `/sent` the hub did not get stays in the page and is
   offered again each round, also to another hub on the same port, which logs it
-  with `late: true`. The exception is a page that was told to stop (a newer paste,
-  a refused token): what it had not reported stays unreported, and the caller is
-  told `unconfirmed`.
+  with `late: true`; the duplicate guard goes by it (below). The exception is a
+  page that was told to stop (a newer paste, a refused token): what it had not
+  reported stays unreported, and the caller is told `unconfirmed` if the go had
+  been given, `notSent` if not - with the text still under the guard. (An item
+  handed to a link at the moment `relay.link()` replaces it on the same paste is
+  not run at all; its caller hears `notSent` after the time limit, about 80 s.)
 - **The chat is bound by id.** A send names `chatId`; the row's name must still go
   with it, and the hub only accepts an (id, name) pair this page reported.
+- **The duplicate guard.** The same text to the same chat within 2 minutes is
+  refused, unless a direct send says `allowDuplicate`. Only a `notSent` that cannot
+  be wrong frees the text: one the page reported (it looked at the box), or one
+  for a message the page never had. When the hub itself gives up on a message the
+  page holds (its time limit, the caller gone), the page may already have typed it
+  and the user's own Enter can still send it: the claim stays until the page's
+  report says what became of it - taken back frees it, sent or unconfirmed keeps
+  it - or for its two minutes. A late report that the text went out puts a claim
+  back if none is left (a hub that restarted). Each message only ever drops its own
+  claim: a repeat that was allowed and then did not go out leaves the first send's
+  claim standing.
 - **Switching chats** (only in link mode): not while the message box holds text,
   not while the LINE window has the keyboard focus (`document.hasFocus()`: the
   user's next keystroke would land in the chat switched to). After a switch,
   nothing is read or typed until the list has stopped showing every message it
   held before the click (by `selectId`; 2 s, then a refusal) - in case the list
-  can lag the header. A chat whose messages did not load is refused before
-  anything is typed. A read that loads older messages returns nothing if another
-  chat was opened while it ran. After a direct send or a read the
-  page goes back to the chat that was open - after reporting, asking the same
-  questions again right before the click, and only away from a chat that item
-  itself opened (`restored: false` otherwise; `PAGE not-restored` when the click
-  back failed).
-- **The hub decides what is followed.** Every answer to a poll lists the followed
-  chat ids; the page drops whatever is not listed, and everything when another hub
-  answers (a new `epoch`). So a follow whose caller went away mid-way, or whose
-  session ended (the hub ends it after 45 s without a word from that session), or
-  that `line_unfollow` stopped while the page was silent, does not go on. And no
-  chat is opened except right after an answer from the hub: with the hub away,
-  nothing is marked read for nobody.
-- **Nothing follows again by itself, and nothing old is reported as new.** After
-  a restart or a new paste, following takes a new `line_follow`, and a newly
-  followed chat starts from what is in it then: none of that is forwarded as
-  `IN`. The follow's answer says per chat how many incoming messages came after
-  the last outgoing one (`unanswered`), for the caller to read and decide. Only a
-  chat that is still followed when it is followed again goes on from where it
-  stands. A follow takes effect whole or not at all: one that fails at its third
-  chat leaves the chats followed before, and what was waiting in them, as they
-  were. (An earlier version kept a dropped follow's position for ten minutes to
-  resume from; a second review showed it replaying hours-old, already answered
-  messages as new ones, so it is gone.)
+  can lag the header - unless the list is positively the chat's own (below). In a
+  1:1 chat every incoming row carries the contact's id (seen live 2026-09-30), so
+  a list holding an incoming row from anyone else is another chat's: nothing is
+  read or typed there, also when no switch was made (the user may have switched
+  by hand while the list was behind), and a bubble seen in such a list is not
+  taken for sent. A 1:1 list whose incoming rows are all the contact's is that
+  chat's own. After a refusal of either kind nothing else is done in the window -
+  no read, no typing, no further switch, no way back - until the old rows are gone
+  from the list, the list is positively the open chat's own, or the user has
+  opened another chat by hand: a second switch would only hide the first. A
+  group's rows say nothing of whose they are; there, only the wait for the old
+  rows guards. A chat whose messages did not load is refused before anything is
+  typed. A read that loads older messages
+  returns nothing if another chat was opened while it ran. After a direct send or
+  a read the page goes back to the chat that was open - after reporting, asking
+  the same questions again right before the click, and only away from a chat that
+  item itself opened (`restored: false` otherwise; when the click back fails after
+  the report, only a `PAGE not-restored` line in the log says so).
 
 The page's waits are timed by the hub in link mode (`GET /wait`, and each `/poll`
 is held up to 1.5 s): an answer to a fetch arrives when it is sent, while a hidden
 page's own timers run about once a minute. With no hub, it falls back to timers.
 
+An answer to `read` whose switch got as far as the header carries `switch`, so
+that the real page's behaviour can be learned from use: `headerMs` (click until
+the header was seen showing the chat - looked at every 100 ms, each look a wait
+timed by the hub, so it can be a round trip late), `laggedAtHeader` (were rows of
+the chat before still shown at that moment), `listMs` (when they were seen gone:
+first looked at after the list has settled - 150 ms to 2 s - so an upper bound,
+and equal to `headerMs` when they were gone at the header already),
+`rowsAtHeader` and `rowsSettled` (did the list fill in after the header).
+`laggedAtHeader` and `listMs` are null when the chat before showed no rows, and
+`listMs` is null when the old rows never went. No `switch` when the header never
+showed the chat, or when nothing was switched. The `line_read` tool passes it on
+as `switch: { header_ms, list_lagged, list_ms, rows_at_header, rows_settled }`.
+
+Typing moves the page's own focus into the message box; when a send is over, the
+page puts it back where it was (the search field, say), so that a key the user
+types on coming back does not land in the box.
+
 ### Not verified live
 
-As of 2026-10-01 everything in this section ("The hub and the page") has run
+As of 2026-10-15 everything in this section ("The hub and the page") has run
 against the mock page only (`tests/mock-line.js`); what the earlier sections call
-verified live was verified through the console bridge.
+verified live was verified through the console bridge. When a point is settled by
+a live run, write the date and what was seen next to it.
+
+- That `setValue('')` - the native setter and an `input` event - really empties
+  LINE's box. Every "nothing is left in the box" (a `notSent` after typing) rests
+  on it; the live check of 2026-09-30 covered typing and Enter, not taking text
+  back.
+- That moving the page's focus back after a send (to where it was, or nowhere)
+  does nothing else to LINE's box - no draft saved, no text lost.
 
 - What a bubble that failed to send looks like (offline, or LINE refusing it). If
   it is rendered like any other outgoing row, `verify()` takes it for sent.
-- Whether the message list can lag the header after a scripted switch. The page
-  waits until none of the messages shown before the click is still shown; if LINE
-  were to show something else in between (neither the old chat nor the new), it
-  would be taken for the new chat's.
+- Whether the message list can lag the header after a scripted switch, and whether
+  it fills in after the header has changed. `switch` in a `line_read` answer
+  measures both: **write the numbers of the first live switches here** - they
+  decide how following is rebuilt. Until then: the page waits until none of the
+  messages shown before the click is still shown; if LINE were to show something
+  else in between (neither the old chat nor the new), it would be taken for the
+  new chat's. A list still filling in when it is read gives a short read, and a
+  send's check for its own bubble a starting point that is too old. After a
+  switch the *user* made by hand while the list was behind, a 1:1 chat is guarded
+  by its contact's id on every incoming row; a group, or a 1:1 list with no
+  incoming row in view, is not.
+- What becomes of text in the message box when another chat is opened: kept as
+  that chat's draft, carried into the next chat's box, or dropped. The page
+  handles each; which one the real page does is not known.
 - Chrome sends `Origin: chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc` on
   these fetches, accepts the hub's preflight answer for the token header, and
   shows no local-network prompt. (The hub answers that origin only.)
@@ -358,13 +425,96 @@ verified live was verified through the console bridge.
   timers are - the reason for the hub-timed waits.
 - `document.hasFocus()` is true only while the LINE window has the keyboard focus,
   and false while its DevTools window has it.
-- A paste of both scripts plus the link line lands whole. It is about 40 KB
-  (2026-10-02): `line_setup` leaves out comment lines, blank lines and indentation,
-  which takes it down from 63 KB. About 34 KB had been pasted by hand before.
+- A paste of both scripts plus the link line lands whole. It is about 44,000
+  characters (2026-10-15): `line_setup` leaves out comment lines, blank lines and
+  indentation, which takes it down from about 70,600. About 34 KB had been pasted
+  by hand before. (The test fails above 50,000, to catch growth by accident.)
 - Group chats (`C...` ids) open and load like 1:1 chats, and their header's first
   line equals the row's name.
 - Text with emoji or several spaces reads back, after the clean-up above, equal to
   what was sent.
+- Claude Code asks the user on every `line_send` (`requiresUserInteraction` and
+  the `ask` rule), showing the chat and the whole text, with no "don't ask again".
+
+### Following: the second phase
+
+`line_follow`, `line_reply`, `line_unfollow` and `line_events` exist and are tested
+against the mock page, but the server registers them only when started with
+`LINE_BRIDGE_EXPERIMENTAL_FOLLOW=1`. That switch is for working on them. It is not
+for a real account: an auto-reply goes out without a prompt, on the strength of an
+`IN` event, and the faults below are about exactly those events.
+
+How it works today:
+
+- **The hub decides what is followed.** Every answer to a poll lists the followed
+  chat ids. If that list is not exactly the page's own, the page stops following
+  every chat and logs `PAGE unfollowed`; the same when another hub answers (a new
+  `epoch`). So a follow whose session ended (the hub ends it after 45 s without a
+  word from that session), or that `line_unfollow` stopped while the page was
+  silent, does not go on. And no chat is opened except right after an answer from
+  the hub: with the hub away, nothing is marked read for nobody.
+- **Nothing follows again by itself, and nothing that was already there is
+  reported as new.** After a restart or a new paste, following takes a new
+  `line_follow`, and a newly followed chat starts from what is in it then. The
+  answer says per chat how many incoming messages came after the last outgoing
+  one (`unanswered`). A chat that is still followed when it is followed again
+  goes on from where it stands. A follow that the page refuses at its k-th chat
+  changes nothing. (An earlier version kept a dropped follow's position for ten
+  minutes to resume from; the second review showed it replaying hours-old,
+  already answered messages as new ones, so it is gone.)
+- **An auto-reply** (`/reply`) is taken only inside what the user approved in the
+  `line_follow` prompt - the chats, a number of replies, a time - and for the
+  session that asked; the approval is counted when the reply is accepted and
+  checked again at the go.
+
+Open, from the third independent review (2026-10-02; each was reproduced in the
+mock page unless marked):
+
+1. A message that could not be collected in time - the user was in the LINE
+   window, the box held a draft, the chat's row was out of view - is passed on
+   later as a plain `IN`, with nothing saying it is late or that an outgoing
+   message already follows it; nothing is logged while it waits.
+2. A `line_follow` that is cancelled, or that the hub stops waiting for, while
+   the page is still visiting the chats ends the follow that was there before -
+   and the tool says "as it was".
+3. An incoming message stamped at or before the newest row at follow time (two
+   clocks) is marked seen and never passed on (`ts > startTs`).
+4. `line_follow` reports the state of the event log as read before its own
+   writes: the call whose `FOLLOW` line cannot be written says nothing.
+5. The baseline of a newly followed chat is whatever the list holds 150-300 ms
+   after the header changed; rows that render later would become `IN`. (By
+   reading only; needs the live measurement above.)
+6. A follow answer that arrives a moment after `line_unfollow` was answered
+   undoes it.
+7. The `unanswered` note says "not reported as IN" also for a chat that was
+   already followed, where some of the counted messages were.
+8. A new follow ends only the caller's own approval, and `line_follow` takes
+   display names where everything else takes chat ids.
+9. Tests that go on passing with the rule removed: the cancellation checks of
+   `line_follow`, "an earlier approval does not outlive a new follow",
+   `log_problem` in `line_follow`, `ts > startTs`, the hub taking the page's
+   `unfollowed`, `onlyOwn` ending a session's own follow, the revoke when a
+   session ends, the inbox emptied when a follow is dropped.
+
+Fixed although it belongs to this part: a followed chat that is already the open
+one is now collected through the same gate as every other reader (it was read
+without the check for a list that had not caught up), and in a 1:1 chat that gate
+also checks the contact's id on every incoming row. An auto-reply's unit of the
+approval comes back only when the text is known not to have gone out - the same
+rule as the duplicate guard.
+
+What the rebuild is to rest on (decided 2026-10-02, to be checked against the
+measurements):
+
+- Make a wrong `IN` harmless instead of trying to make every `IN` exact. An
+  auto-reply names the message it answers; right before typing, the page checks
+  that this row is in the open chat, is its newest row, has no outgoing row after
+  it, and is not older than a few minutes.
+- An `IN` says how old the message is and whether an outgoing one follows it.
+- One gate for every reader of the message list.
+- Measure first: the `switch` numbers, whether rows fill in late, what
+  `document.hasFocus()` does while DevTools has the focus, how long an answer to
+  a fetch takes in a hidden window, and whether group chats behave like 1:1.
 
 ## When the extension changes
 

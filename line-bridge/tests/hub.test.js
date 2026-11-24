@@ -11,6 +11,14 @@ const { pathToFileURL } = require('url');
 const { request: send1, freePort } = require('./http');
 
 let failures = 0;
+// A check that waits on something that never comes leaves Node with nothing to
+// do, and Node then exits with code 0 - mid-file, without a word. Not a pass.
+let finished = false;
+process.on('exit', code => {
+  if (finished || code !== 0) return;
+  console.log('FAIL the test file ended before its last check: something it waited for never came');
+  process.exitCode = 1;
+});
 const check = (name, actual, expected) => {
   const ok = JSON.stringify(actual) === JSON.stringify(expected);
   if (!ok) { failures++; console.log(`FAIL ${name}\n  expected: ${JSON.stringify(expected)}\n  actual:   ${JSON.stringify(actual)}`); }
@@ -135,6 +143,15 @@ const settled = (p, ms = 150) => Promise.race([p.then(() => true), sleep(ms).the
   const twice = send({ text: '你好', allowDuplicate: true });
   await pageSends(P1);
   check('...unless the caller says so', (await twice).ok, true);
+  // An allowed repeat that then does not go out must not undo the guard of the send it repeated.
+  const kept = send({ text: '重複防護要留著' });
+  await pageSends(P1);
+  await kept;
+  const repeat = send({ text: '重複防護要留著', allowDuplicate: true });
+  await pageSends(P1, { ok: false, notSent: true, why: 'the user is typing' });
+  check('an allowed repeat that ends notSent...', pick(await repeat, ['ok', 'notSent']), { ok: false, notSent: true });
+  check('...leaves the first send\'s guard standing: the same text is still refused',
+    pick(await send({ text: '重複防護要留著', commitMs: 150, reportMs: 50 }), ['notSent', 'duplicate']), { notSent: true, duplicate: true });
   const failedOnce = send({ text: '第一次沒送成' });
   await pageSends(P1, { ok: false, notSent: true, why: 'the user is typing' });
   check('a definite notSent comes back as such', pick(await failedOnce, ['ok', 'notSent', 'why']), { ok: false, notSent: true, why: 'the user is typing' });
@@ -163,6 +180,34 @@ const settled = (p, ms = 150) => Promise.race([p.then(() => true), sleep(ms).the
   const held = await take(P1);
   check('picked up but not ready in time -> a definite notSent', pick(await stalled, ['ok', 'notSent']), { ok: false, notSent: true });
   check('...and a late request to send gets no go', (await P1.post('/commit', { id: held.id })).body.go, false);
+
+  // The text sits in a box the user can reach: their own Enter can send it, go or no go.
+  const byUser = send({ text: '使用者自己按了 Enter' });
+  const byUserItem = await take(P1);
+  await P1.post('/sent', { id: byUserItem.id, chat: byUserItem.chat, chatId: byUserItem.chatId, text: byUserItem.text, ok: true, why: 'sent by an Enter that was not this script\'s' });
+  check('a report that the text went out though no go was asked for: the caller hears sent, with the reason',
+    pick(await byUser, ['ok', 'why']), { ok: true, why: 'sent by an Enter that was not this script\'s' });
+  check('...and the text is guarded against going out again',
+    pick(await send({ text: '使用者自己按了 Enter', commitMs: 150, reportMs: 50 }), ['notSent', 'duplicate']), { notSent: true, duplicate: true });
+  // The hub gives up on a message the page holds: the page may have typed it, and
+  // the user's own Enter can still send it. The text stays guarded until the page
+  // says what became of it.
+  const quick = text => send({ text, commitMs: 150, reportMs: 50 });   // nobody takes it: ends at once
+  const givenUp = quick('放棄之後才知道送出了');
+  const givenUpItem = await take(P1);
+  check('a message the hub gave up on while the page held it: notSent to the caller...', pick(await givenUp, ['ok', 'notSent']), { ok: false, notSent: true });
+  check('...but the text is not free again: the page may have typed it', pick(await quick('放棄之後才知道送出了'), ['notSent', 'duplicate']), { notSent: true, duplicate: true });
+  await P1.post('/sent', { id: givenUpItem.id, chat: givenUpItem.chat, chatId: givenUpItem.chatId, text: givenUpItem.text, ok: true });
+  check('...the page then reports that it went out (the user pressed Enter): logged as late, and the text stays guarded',
+    [logged('SENT').slice(-1).map(e => [e.id, e.late]), pick(await quick('放棄之後才知道送出了'), ['notSent', 'duplicate'])],
+    [[[givenUpItem.id, true]], { notSent: true, duplicate: true }]);
+  const takenBack = quick('放棄之後收回了');
+  const takenBackItem = await take(P1);
+  await takenBack;
+  const stillHeld = pick(await quick('放棄之後收回了'), ['notSent', 'duplicate']);
+  await P1.post('/sent', { id: takenBackItem.id, chat: takenBackItem.chat, chatId: takenBackItem.chatId, text: takenBackItem.text, ok: false, notSent: true, why: 'taken back' });
+  check('...and when the page reports that it took the text back, the text is free again',
+    [stillHeld, pick(await quick('放棄之後收回了'), ['notSent', 'duplicate'])], [{ notSent: true, duplicate: true }, { notSent: true, duplicate: undefined }]);
 
   const late = send({ text: '超過時限才要送' });
   const lateItem = await take(P1);
@@ -200,6 +245,27 @@ const settled = (p, ms = 150) => Promise.race([p.then(() => true), sleep(ms).the
   await hungUpLater;
   await sleep(100);
   check('a caller that hangs up after the page took it, before the go: no go', (await P1.post('/commit', { id: orphan.id })).body.go, false);
+  check('...and its text stays guarded until the page says what became of it', pick(await quick('拿走之後呼叫端才走'), ['notSent', 'duplicate']), { notSent: true, duplicate: true });
+  await P1.post('/sent', { id: orphan.id, chat: orphan.chat, chatId: orphan.chatId, text: orphan.text, ok: false, notSent: true, why: 'taken back' });
+  check('...which frees it once the page took it back', pick(await quick('拿走之後呼叫端才走'), ['notSent', 'duplicate']), { notSent: true, duplicate: undefined });
+  const gone3 = new AbortController();
+  const afterGo = ctl('/send', { id: uid(), chat: '王小明', chatId: WANG, text: '許可之後呼叫端才走', build: BUILD }, controlSecret, gone3.signal).catch(e => e.name);
+  const afterGoItem = await take(P1);
+  check('a go is given once: asked again before the report, the answer is no',
+    [(await P1.post('/commit', { id: afterGoItem.id })).body.go, (await P1.post('/commit', { id: afterGoItem.id })).body.go], [true, false]);
+  gone3.abort();
+  await afterGo;
+  await sleep(100);
+  check('a caller that hangs up after the go: the text stays guarded - the Enter is the page\'s now',
+    pick(await quick('許可之後呼叫端才走'), ['notSent', 'duplicate']), { notSent: true, duplicate: true });
+  check('...and the log does not say it was not sent: after the go, that is the page\'s to say',
+    logged('SENDFAIL').some(e => e.id === afterGoItem.id), false);
+  await P1.post('/sent', { id: afterGoItem.id, chat: afterGoItem.chat, chatId: afterGoItem.chatId, text: afterGoItem.text, ok: true });
+  check('...and the page\'s report still closes it', logged('SENT').slice(-1).map(e => e.id), [afterGoItem.id]);
+  // A report about a message this hub never had (it was started after the page took it): what it says still counts.
+  await P1.post('/sent', { id: uid(), chat: '王小明', chatId: WANG, text: '上一個 hub 交出去的', ok: true });
+  check('a report about a message from before this hub that says it went out: the text is guarded here too',
+    pick(await quick('上一個 hub 交出去的'), ['notSent', 'duplicate']), { notSent: true, duplicate: true });
 
   console.log('--- two pages ---');
   const handover = send({ text: '換頁之前拿走的' });
@@ -386,6 +452,7 @@ const settled = (p, ms = 150) => Promise.race([p.then(() => true), sleep(ms).the
   await hub.close();
 
   for (const d of [tmp, tmp2, tmp3]) fs.rmSync(d, { recursive: true, force: true });
+  finished = true;
   console.log(failures === 0 ? '\nALL PASSED' : `\n${failures} FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 })().catch(e => { console.error(e); process.exit(1); });

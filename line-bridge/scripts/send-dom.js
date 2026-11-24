@@ -22,9 +22,12 @@
 //   LINESEND.relay.stop() / .status() / .ready()
 //
 // Results that are not ok say which kind of "not ok" they are:
-//   notSent: true      nothing was sent (refused before Enter, or Enter not taken)
-//   unconfirmed: true  Enter went out but no bubble was seen - it MAY have been
-//                      sent. Read the chat before sending the text again.
+//   notSent: true      nothing was sent and nothing of it is left in the box
+//                      (refused before typing, taken back, or Enter not taken)
+//   unconfirmed: true  it MAY have been sent, or may still sit in the box: Enter
+//                      went out and no bubble was seen, or someone else touched
+//                      the box while the text was in it. Read the chat before
+//                      sending the text again.
 //
 // How sending works (verified live 2026-09-30): the message box is <textarea-ex>,
 // a Lit web component with an OPEN shadow root around a real <textarea>. Setting
@@ -95,6 +98,10 @@ globalThis.LINESEND = (() => {
   const norm = s => String(s == null ? '' : s).normalize('NFC')
     .replace(/[\u200B\u200C\u200D\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
   const outgoing = rows => rows.filter(r => r.direction === 'outgoing' && r.selectId);
+  // In a 1:1 chat (a U... id) every incoming row carries the contact's mid, which
+  // is the chat id (seen live 2026-09-30). An incoming row from anyone else means
+  // the list on screen is another chat's, whatever the header says.
+  const foreignIn = (rows, chat) => /^U/i.test(chat || '') && rows.some(r => r.direction === 'incoming' && r.senderMid && r.senderMid !== chat);
   // A bubble that turns up after typing only counts as the one just sent when it
   // is not older than what was newest then: an old message with the same text can
   // scroll into view while we wait. The slack is for two clocks (LINE's and this
@@ -160,7 +167,11 @@ globalThis.LINESEND = (() => {
     if (chatId() !== pending.chat) {
       return { ok: false, sent: false, moved: true, text: pending.text, why: 'another chat is open now' };
     }
-    const fresh = outgoing(LINEX.collect()).filter(r =>
+    const rows = LINEX.collect();
+    if (foreignIn(rows, pending.chat)) {
+      return { ok: false, sent: false, moved: true, text: pending.text, why: 'the message list shown is another chat\'s' };
+    }
+    const fresh = outgoing(rows).filter(r =>
       !pending.before.has(r.selectId) && (r.ts || 0) >= pending.newest - CLOCK_SLACK_MS);
     const sent = fresh.some(r => norm(r.text) === norm(pending.text));
     const out = { ok: sent, sent, boxEmpty: isEmpty(box()), text: pending.text };
@@ -182,13 +193,55 @@ globalThis.LINESEND = (() => {
   // beforeCommit: an async function asked right before Enter. Unless it resolves
   // to true or { go: true }, nothing is sent ({ why } becomes the reason). The
   // relay uses it to ask its server whether the reply is still wanted.
-  async function send(text, name, { chat, settleMs = 300, timeoutMs = 5000, beforeCommit, goFreshMs = GO_FRESH_MS } = {}) {
-    let entered = false;   // has the Enter gone out? decides notSent vs unconfirmed
+  // mayType: asked before typing and again before Enter; a string is the reason
+  // not to (link mode: the user is in the LINE window).
+  async function send(text, name, { chat, settleMs = 300, timeoutMs = 5000, beforeCommit, goFreshMs = GO_FRESH_MS, mayType } = {}) {
+    const prior = document.activeElement;   // typing moves the page's focus into the box: it goes back here
     try {
+      return await sendOnce(text, name, { chat, settleMs, timeoutMs, beforeCommit, goFreshMs, mayType });
+    } finally {
+      focusBack(prior);
+    }
+  }
+
+  // Put the page's own focus back where it was before typing: a key the user types
+  // when they come back to the window must not land in the message box when it
+  // was somewhere else (the search field, say).
+  function focusBack(prior) {
+    try {
+      const now = document.activeElement;
+      if (prior === now) return;
+      if (prior && prior !== document.body && prior.isConnected && typeof prior.focus === 'function') prior.focus({ preventScroll: true });
+      else if (now && now !== document.body && typeof now.blur === 'function') now.blur();
+    } catch (e) { /* leave it as it is */ }
+  }
+
+  async function sendOnce(text, name, { chat, settleMs, timeoutMs, beforeCommit, goFreshMs, mayType }) {
+    let typed = false;   // once the text is in the box, an exception no longer means "nothing went out"
+    // Look for the bubble until the time is up. On the clock: a hidden page's
+    // timers run about once a minute, and a count of sleeps would keep this
+    // waiting for twenty.
+    const watch = async () => {
+      for (const until = Date.now() + timeoutMs; ;) {
+        await sleep(250);
+        const v = verify();
+        if (v.sent || v.moved || Date.now() >= until) return v;
+      }
+    };
+    try {
+      const busy = mayType && mayType();
+      if (busy) return refuse(busy);
       const s = stage(text, name, chat);
       if (!s.ok) return s;
+      typed = true;
       await sleep(settleMs);
-      if (beforeCommit) {
+      // The text has sat in a box the user can reach. It is ours to send, or to
+      // take back, only while a box still holds exactly that text.
+      const intact = () => !checkChat(name, chat) && holds(box(), text);
+      let stop = (mayType && mayType()) || null;   // why Enter is not to be pressed: the user came into the window
+      // Nobody is asked for a go when the box is no longer ours: the answer
+      // would be about a text that may already have gone out.
+      if (!stop && beforeCommit && intact()) {
         let go = false, why = 'called off before Enter';
         const asked = Date.now();
         try {
@@ -202,35 +255,43 @@ globalThis.LINESEND = (() => {
           go = false;
           why = 'the go came back after ' + Math.round((Date.now() - asked) / 1000) + ' s, too late to act on; not sent';
         }
-        if (!go) {
-          // Clear only our own text: the user may have typed meanwhile.
-          if (holds(box(), text)) setValue('');
+        if (!go) stop = why;
+        else stop = (mayType && mayType()) || null;   // ...or came in while the relay was asked
+      }
+      const elsewhere = checkChat(name, chat);
+      if (!holds(box(), text)) {
+        if (elsewhere) {
           pending = null;
-          return refuse(why);
+          return unsure('another chat was opened while the text was in the message box of ' + JSON.stringify(name) +
+                        '; this script did not send it, but it may be left there as a draft - open that chat and look');
         }
+        // An Enter that was not ours may have sent it: look for its bubble.
+        pending.committed = true;
+        const seen = await watch();
+        pending = null;
+        if (seen.sent) return { ok: true, why: 'sent by an Enter that was not this script\'s, while the text was in the box' };
+        return unsure('the message box was changed by someone else while the text was in it, and no bubble with this text was seen' +
+                      ' - it may still be in the box, or have gone out; read ' + JSON.stringify(name) + ' before sending it again');
+      }
+      if (elsewhere || stop) {
+        setValue('');   // exactly our text, wherever the window is now: take it back
+        pending = null;
+        return refuse(elsewhere ? 'another chat was opened while the text was in the box; the text was taken back' : stop);
       }
       const c = commit(text, name, chat);
       if (!c.ok) {
-        // Clear only our own text: the user may have typed during the settle.
-        if (holds(box(), text)) setValue('');
+        // Not expected after the checks above; the box decides once more.
+        const ours = holds(box(), text);
+        if (ours) setValue('');
         pending = null;
-        return c;
+        return ours ? c : unsure(c.why);
       }
-      entered = true;
-      // On the clock: a hidden page's timers run about once a minute, and a
-      // count of sleeps would keep this waiting for twenty.
-      for (const until = Date.now() + timeoutMs; ;) {
-        await sleep(250);
-        const v = verify();
-        if (v.sent) { pending = null; return { ok: true }; }
-        if (v.moved) {
-          pending = null;
-          return unsure('another chat was opened right after Enter - read ' + JSON.stringify(name) +
-                        ' before sending it again');
-        }
-        if (Date.now() >= until) break;
-      }
+      const v = await watch();
       pending = null;
+      if (v.sent) return { ok: true };
+      if (v.moved) {
+        return unsure('right after Enter, ' + v.why + ' - read ' + JSON.stringify(name) + ' before sending it again');
+      }
       if (holds(box(), text)) {
         // The app called preventDefault, so it may still be sending: leave the
         // text where it is and say so, instead of claiming nothing went out.
@@ -244,8 +305,8 @@ globalThis.LINESEND = (() => {
                     ' ms - read the chat before sending it again');
     } catch (e) {
       pending = null;
-      const why = 'exception ' + (entered ? 'after' : 'before') + ' Enter: ' + (e && e.message || e);
-      return entered ? unsure(why) : refuse(why);
+      const why = 'exception ' + (typed ? 'after' : 'before') + ' typing: ' + (e && e.message || e);
+      return typed ? unsure(why) : refuse(why);
     }
   }
 
@@ -299,7 +360,8 @@ globalThis.LINESEND = (() => {
     const rowsNow = () => { try { return LINEX.collect(); } catch (e) { return []; } };
 
     // Open a followed chat by clicking its row, and wait until it is really there.
-    async function open(t) {
+    // onHeader: called the moment the header shows the chat, before the list settles.
+    async function open(t, onHeader) {
       if (isOpen(t)) return { ok: true };
       // Never pull the window away from something the user is typing.
       let b = null;
@@ -316,6 +378,7 @@ globalThis.LINESEND = (() => {
         if (Date.now() - t0 > 4000) return refuse('clicked ' + JSON.stringify(t.name) + ' but the chat did not open');
         await sleep(100);
       }
+      if (onHeader) onHeader();
       // Let the message list settle: the same row count on two looks (on the
       // clock, like send(): a hidden page's sleeps can take a minute each).
       for (let n = -1, until = Date.now() + 2000; ;) {
@@ -523,8 +586,11 @@ globalThis.LINESEND = (() => {
       ? globalThis.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 
     // The token goes in a header: a URL shows up in the page's resource timings.
-    const hub = (L, method, path, body, query) =>
-      fetch(L.url + path + '?i=' + L.instance + '&l=' + L.linkedAt + '&b=' + encodeURIComponent(L.build) + (query || ''), {
+    // limitMs: give up after this long. For the question before Enter, where a
+    // hub that neither answers nor closes would leave our text in the user's box
+    // (on a timer: in a hidden page it can fire up to a minute late).
+    const hub = (L, method, path, body, query, limitMs) => {
+      const asked = fetch(L.url + path + '?i=' + L.instance + '&l=' + L.linkedAt + '&b=' + encodeURIComponent(L.build) + (query || ''), {
         method,
         headers: Object.assign({ 'x-line-bridge-token': L.token }, body === undefined ? null : { 'content-type': 'application/json' }),
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -532,6 +598,10 @@ globalThis.LINESEND = (() => {
         if (!r.ok) throw Object.assign(new Error(path + ' HTTP ' + r.status), { status: r.status });
         return r.json();
       });
+      if (!limitMs) return asked;
+      asked.catch(() => {});   // an answer that comes after the limit is nobody's to handle
+      return Promise.race([asked, timerSleep(limitMs).then(() => { throw new Error('no answer from the relay within ' + limitMs + ' ms'); })]);
+    };
 
     const focused = L => { try { return !!L.hasFocus(); } catch (e) { return false; } };
     const here = () => (chatId() ? { name: header(), chat: chatId() } : null);
@@ -551,13 +621,29 @@ globalThis.LINESEND = (() => {
       return true;
     }
     const LAGGING = name => 'after switching to ' + JSON.stringify(name) + ' the message list still shows the chat that was open before; nothing was read or typed';
+    // After a switch whose list did not catch up, nothing in the window is to be
+    // trusted: no reading, no typing and no further switch (a second one would
+    // only hide the first) until the list has moved on from the rows that were
+    // shown before it. Returns the reason while that lasts.
+    function lagging(L) {
+      if (!L.stale) return null;
+      const s = L.stale;
+      if (chatId() === s.chat && rowsNow().some(r => r.selectId && s.ids.has(r.selectId)) && !theirOwn(s.chat)) return LAGGING(s.name);
+      L.stale = null;   // caught up, positively that chat's list, or the user has moved the window since
+      return null;
+    }
+    // A 1:1 chat whose list is positively its own: it holds incoming rows, and all
+    // of them are the contact's. (A group's rows say nothing of the kind.)
+    const theirOwn = chat => /^U/i.test(chat) && rowsNow().some(r => r.direction === 'incoming' && r.senderMid === chat) && !foreignIn(rowsNow(), chat);
 
-    // Open a chat for the hub. On top of open()'s own checks: not while the user
-    // is in the LINE window (their next keystroke would land in the chat we
-    // switch to), only a row whose name still goes with the id, and only a chat
-    // whose own messages are really there.
+    // Open a chat for the hub - the one way to a chat's list, also when the chat
+    // is the open one. On top of open()'s own checks: not while the user is in
+    // the LINE window (their next keystroke would land in the chat we switch
+    // to), only a row whose name still goes with the id, and only a chat whose
+    // own messages are really there.
     async function openFor(L, t) {
-      if (L.stale && chatId() !== L.stale.chat) L.stale = null;   // the window has moved on since
+      const lag = lagging(L);
+      if (lag) return refuse(lag);
       if (!isOpen(t)) {
         if (focused(L)) {
           return refuse('the LINE window has the keyboard focus (the user is in it); not switching to ' + JSON.stringify(t.name));
@@ -566,19 +652,33 @@ globalThis.LINESEND = (() => {
         if (row && row.name !== t.name) {
           return refuse('the chat ' + t.chat + ' is named ' + JSON.stringify(row.name) + ', not ' + JSON.stringify(t.name));
         }
-        const was = chatId(), before = idsNow();
-        const o = await open(t);
+        const was = chatId(), before = idsNow(), t0 = Date.now();
+        // How the switch went, for the caller to report: whether LINE's list can
+        // lag its header, or fill in late, is known only from measuring it.
+        const sw = { headerMs: null, listMs: null, laggedAtHeader: null, rowsAtHeader: null, rowsSettled: null };
+        const o = await open(t, () => {
+          sw.headerMs = Date.now() - t0;
+          sw.rowsAtHeader = rowsNow().length;
+          sw.laggedAtHeader = before.size ? rowsNow().some(r => r.selectId && before.has(r.selectId)) : null;
+          if (sw.laggedAtHeader === false) sw.listMs = sw.headerMs;
+        });
         // Whichever chat the click left the window on is ours to leave again.
         if (chatId() !== was) L.opened.push(chatId());
         if (!o.ok) return o;
-        if (!(await caughtUp(before))) {
-          L.stale = { chat: t.chat, ids: before };
+        const caught = await caughtUp(before);
+        if (caught && sw.laggedAtHeader) sw.listMs = Date.now() - t0;   // when it was seen gone: an upper bound
+        sw.rowsSettled = rowsNow().length;
+        L.lastSwitch = sw;
+        if (!caught && !theirOwn(t.chat)) {
+          L.stale = { chat: t.chat, name: t.name, ids: before };
           return refuse(LAGGING(t.name));
         }
-      } else if (L.stale && L.stale.chat === t.chat) {
-        // We came here by a switch whose list had not caught up: look again.
-        if (rowsNow().some(r => r.selectId && L.stale.ids.has(r.selectId))) return refuse(LAGGING(t.name));
-        L.stale = null;
+      }
+      if (foreignIn(rowsNow(), t.chat)) {
+        // The list is another chat's - after a switch the user made by hand while
+        // it was behind, say. Treated like a switch that did not catch up.
+        L.stale = { chat: t.chat, name: t.name, ids: idsNow() };
+        return refuse('the message list under ' + JSON.stringify(t.name) + ' holds messages from someone else: it is another chat\'s, whatever the header says; nothing was read or typed');
       }
       if (!loaded(t)) {
         return Object.assign(refuse(JSON.stringify(t.name) + ' shows no messages although its preview is not empty: ' +
@@ -603,6 +703,7 @@ globalThis.LINESEND = (() => {
       const now = chatId();
       if (!from || now === from.chat) return null;
       if (!L.opened.includes(now)) return { go: false, why: 'another chat was opened meanwhile' };
+      if (lagging(L)) return { go: false, why: 'the message list has not caught up with the last switch' };
       let b = null;
       try { b = box(); } catch (e) { /* no box: nothing typed */ }
       if (b && !isEmpty(b)) return { go: false, why: 'the message box is not empty' };
@@ -658,18 +759,19 @@ globalThis.LINESEND = (() => {
       if (!found.t) return { ok: false, why: found.why, value: found.candidates ? { candidates: found.candidates } : {} };
       const t = found.t;
       const o = await openFor(L, t);
+      const sw = L.lastSwitch ? { switch: L.lastSwitch } : null;   // only when this read switched chats
       // Never an empty list for a chat that did not load: it would read as "nothing was said".
-      if (!o.ok) return { ok: false, why: o.why, value: o.notLoaded ? { notLoaded: true } : {} };
-      const value = { header: t.name, chat: t.chat };
+      if (!o.ok) return { ok: false, why: o.why, value: Object.assign(o.notLoaded ? { notLoaded: true } : {}, sw) };
+      const value = Object.assign({ header: t.name, chat: t.chat }, sw);
       if (a.history === true) {
         // Loading older messages scrolls the chat; a hidden page would take a minute per step.
         if (document.visibilityState === 'hidden') {
-          return { ok: false, why: 'older messages can only be loaded while the LINE window is visible (it is hidden or minimised)', value: { hidden: true } };
+          return { ok: false, why: 'older messages can only be loaded while the LINE window is visible (it is hidden or minimised)', value: Object.assign({ hidden: true }, sw) };
         }
         const all = await LINEX.loadAll({ copy: false, deadlineMs: Math.min(Math.max(Number(a.deadlineMs) || 20000, 1000), 40000), sleep });
         // The load takes seconds, in a window the user can see: what it read is
         // this chat's only if this chat is still the one open.
-        if (!isOpen(t)) return { ok: false, why: 'another chat was opened while older messages were loading; nothing is returned', value: {} };
+        if (!isOpen(t)) return { ok: false, why: 'another chat was opened while older messages were loading; nothing is returned', value: Object.assign({}, sw) };
         value.messages = all.messages;
         if (all.truncated) value.truncated = true;
       } else {
@@ -780,8 +882,14 @@ globalThis.LINESEND = (() => {
         res = refuse('exception before typing: ' + (e && e.message || e));
       }
       if (res.ok) {
-        // send() never throws. The hub is asked right before Enter.
-        res = await send(item.text, t.name, { chat: t.chat, beforeCommit: () => hub(L, 'POST', '/commit', { id: item.id }) });
+        // send() never throws. Nothing is typed while the user is in the LINE
+        // window - their next keystroke or Enter would land in our text - and
+        // the hub is asked right before Enter.
+        res = await send(item.text, t.name, {
+          chat: t.chat,
+          mayType: () => (focused(L) ? 'the LINE window has the keyboard focus (the user is in it); nothing is typed while they are there' : null),
+          beforeCommit: () => hub(L, 'POST', '/commit', { id: item.id }, undefined, L.commitAskMs),
+        });
         try { noteVisit(t); } catch (e) { /* the result stands */ }
       }
       return answer(res);
@@ -814,6 +922,7 @@ globalThis.LINESEND = (() => {
       const op = item.kind === 'op';
       const from = here();   // where the user was
       L.opened = [];         // the chats this item switches to
+      L.lastSwitch = null;   // ...and how its last switch went
       let out;
       try {
         out = op ? await runOp(L, item) : await runSend(L, item);
@@ -844,7 +953,7 @@ globalThis.LINESEND = (() => {
           try { o = await open(from); } catch (e) { o = refuse(String(e && e.message || e)); }
           // Nothing is read or typed here now; but the next item for this chat
           // must not take a list that has not caught up for this chat's own.
-          if (o.ok && !(await caughtUp(before))) L.stale = { chat: from.chat, ids: before };
+          if (o.ok && !(await caughtUp(before))) L.stale = { chat: from.chat, name: from.name, ids: before };
         }
         if (o && !o.ok) {
           ln.reports.push({ path: '/log', body: { event: 'not-restored', left: (here() || {}).name || null, wanted: from.name, why: o.why } });
@@ -886,11 +995,11 @@ globalThis.LINESEND = (() => {
         if (L.stopped || ln.follow !== f) break;
         const el = itemOf(t.chat);
         t.missing = !el;
-        if (!isOpen(t)) {
-          if (!el || itemSnap(el) === t.snap) continue;
-          const o = await openFor(L, t);
-          if (!o.ok) { problem = o.why; continue; }   // again next round
-        }
+        if (!isOpen(t) && (!el || itemSnap(el) === t.snap)) continue;
+        // Through openFor also when the chat is the open one: after a switch
+        // that did not catch up, its list is not its own yet.
+        const o = await openFor(L, t);
+        if (!o.ok) { problem = o.why; continue; }   // again next round
         collectNew(t, ln.inbox);
         t.snap = itemSnap(itemOf(t.chat));
       }
@@ -921,8 +1030,8 @@ globalThis.LINESEND = (() => {
       } catch (e) {
         L.hubOk = false;
         ln.lastError = String(e && e.message || e);
-        if (e && e.status === 409) unlink('a newer paste of the script has taken over');
-        if (e && e.status === 403) unlink('the hub refused the token - run line_setup and paste again');
+        if (e && e.status === 409) unlink(L, 'a newer paste of the script has taken over');
+        if (e && e.status === 403) unlink(L, 'the hub refused the token - run line_setup and paste again');
       } finally {
         L.busy = false;
       }
@@ -940,23 +1049,27 @@ globalThis.LINESEND = (() => {
       }
     }
 
-    function unlink(why) {
-      if (!link) return;
-      link.stopped = true;
-      if (why) ln.lastError = why;
+    // Stops that link - the one that was told to, which need not be the current
+    // one: relay.link() called again leaves an older link to hear its 409.
+    function unlink(L, why) {
+      if (!L) return;
+      L.stopped = true;
+      if (why && link === L) ln.lastError = why;
     }
 
-    function linkTo({ url = 'http://127.0.0.1:38766', token, build = '', pollMs = 1500, auto = true, hasFocus } = {}) {
+    function linkTo({ url = 'http://127.0.0.1:38766', token, build = '', pollMs = 1500, auto = true, hasFocus, commitAskMs = 5000 } = {}) {
       if (!token) return { ok: false, why: 'relay.link needs { token } - line_setup puts the whole line on the clipboard' };
       stop();   // the older relay, and an earlier link
       const L = link = {
-        url, token, build: String(build), pollMs, instance: newId(), linkedAt: Date.now(), epoch: null,
-        hasFocus: hasFocus || (() => document.hasFocus()), opened: [], stale: null, toldEmpty: false,
+        url, token, build: String(build), pollMs, commitAskMs, instance: newId(), linkedAt: Date.now(), epoch: null,
+        hasFocus: hasFocus || (() => document.hasFocus()), opened: [], stale: null, lastSwitch: null, toldEmpty: false,
         hubOk: false, busy: false, stopped: false, starting: null,
       };
       dropFollow();   // a new link follows nothing yet
       ln.lastError = null;
-      sleep = ms => hub(L, 'GET', '/wait', undefined, '&ms=' + ms).catch(() => timerSleep(ms));
+      // With a limit: a hub that neither answers nor closes would otherwise hold
+      // a wait - with our text in the user's box - for as long as it hangs.
+      sleep = ms => hub(L, 'GET', '/wait', undefined, '&ms=' + ms, ms + 3000).catch(() => timerSleep(ms));
       L.starting = hub(L, 'POST', '/log', { event: 'linked', header: header(), chat: chatId() || null })
         .then(r => { L.epoch = r.epoch; L.hubOk = true; }, e => { ln.lastError = String(e && e.message || e); })
         .then(() => { if (auto) run(L); });
@@ -968,7 +1081,7 @@ globalThis.LINESEND = (() => {
       if (timer) clearInterval(timer);
       timer = null;
       if (cfg) cfg.stopped = true;
-      unlink();
+      unlink(link);
       return { stopped: true, ticks: st.ticks };
     }
 

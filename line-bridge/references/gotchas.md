@@ -126,7 +126,55 @@ one connection per request (`http.request` with `agent: false`).
 **An event has a kind, and so has a message.** An `IN` event flattened into
 `{ kind, ...data }` came out with `kind: "text"`: the message's own kind had
 overwritten the event's. Events are `{ seq, at, kind, data }`, in the hub and in
-`line_events`; only the log line is flat.
+`line_events` (a tool that is switched off for now); only the log line is flat.
+
+**Typed text sits in a box the user can reach.** Between typing and Enter (0.3 s
+plus a round trip to the hub) an Enter of the user's sent the text, and the page -
+finding the box empty - reported "nothing was sent"; the hub then freed the text
+for another try, and the second try made two bubbles (found by the third review,
+reproduced in the mock page, 2026-10-02). Now: nothing is typed while the user is
+in the LINE window; a box that no longer holds exactly the typed text is never
+`notSent` - the page looks for the bubble and says `sent` or `unconfirmed`. The
+first version of that fix still freed the text whenever the hub itself gave up on
+a message the page held (its time limit, the caller gone): if the user's Enter
+sent it in that moment, a retry made two bubbles (fourth review, 2026-10-15). So
+only a `notSent` the page reported, or one for a message the page never had,
+frees the text; otherwise the claim waits for the page's own report. "Our Enter
+did not go out" is not "nothing went out".
+
+**Waiting for the old rows to leave proves a switch, not whose rows came.** The
+check after a scripted switch ("none of the messages shown before the click is
+still shown") passed when a second switch was made while the list was still one
+chat behind; and a switch the user made by hand, while the list was behind, left
+the next scripted switch reading another chat's rows (fourth review). So after a
+switch that did not catch up nothing else is done in the window - no read, no
+typing, no further switch, no way back - and in a 1:1 chat the rows themselves
+are checked: every incoming row must carry the contact's id. Whether LINE's list
+ever lags its header is not known: `line_read` reports how each switch went
+(`switch`), so that the first live sessions show it.
+
+**Typing moves the page's focus.** `setValue` focuses the message box; after a
+send the focus stayed there, so a user who had been in LINE's search field, came
+back and typed on with Enter would have sent that as a message. The page now puts
+its focus back where it was when a send is over.
+
+**The 2,048-character limit shows only with every tool on.** The instructions
+reached 2,207 characters with the follow tools switched on (1,589 without) before
+they were cut down - 2,038 and 1,611 on 2026-10-15; Claude Code cuts at 2,048
+without a word. The test measures both modes.
+
+**A test that waits for something that never comes passes.** A check awaited a
+promise that would never settle; with no timer and no socket left, Node ended the
+file with exit code 0, before the remaining checks, and `npm test` went on to the
+next file. Found by taking a time limit out of the page script: every suite still
+"passed" (2026-10-02). Each async test file now sets a flag before its last line
+and fails in an `exit` handler when the flag is not set. When checking that a rule
+is tested, look for the closing `ALL PASSED`, not only at the exit code.
+
+**"Same program" needs a tokenizer, not a count of backticks.** The paste is the
+scripts with lines trimmed and comment lines dropped. A guard that counted
+backticks per line missed a nested template and a backtick inside a string; the
+test now compares the token streams (acorn) of the files and of the pasted text.
 
 **Started through a directory junction, the server exited at once.** The check
 "was this file run, or imported?" compared the path given with the file's real

@@ -1,6 +1,12 @@
 {
   "private": true,
   "description": "Tests for extract-dom.js, send-dom.js (jsdom), relay.py, the MCP hub (local HTTP) and the MCP server (stdio)",
-  "scripts": { "test": "node run.js && node send.js && python test_relay.py && node hub.test.js && node hub-page.test.js && node mcp.test.js" },
-  "devDependencies": { "@modelcontextprotocol/client": "2.2.0", "jsdom": "^29.1.1" }
+  "scripts": {
+    "test": "node run.js && node send.js && python test_relay.py && node hub.test.js && node hub-page.test.js && node mcp.test.js"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.2.0",
+    "acorn": "8.18.0",
+    "jsdom": "^29.1.1"
+  }
 }

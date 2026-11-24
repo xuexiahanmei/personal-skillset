@@ -15,6 +15,14 @@ const mock = require('./mock-line')();
 const { addChat, addMessage, openChat, sentIn, box } = mock;
 
 let failures = 0;
+// A check that waits on something that never comes leaves Node with nothing to
+// do, and Node then exits with code 0 - mid-file, without a word. Not a pass.
+let finished = false;
+process.on('exit', code => {
+  if (finished || code !== 0) return;
+  console.log('FAIL the test file ended before its last check: something it waited for never came');
+  process.exitCode = 1;
+});
 const check = (name, actual, expected) => {
   const ok = JSON.stringify(actual) === JSON.stringify(expected);
   if (!ok) { failures++; console.log(`FAIL ${name}\n  expected: ${JSON.stringify(expected)}\n  actual:   ${JSON.stringify(actual)}`); }
@@ -84,13 +92,40 @@ const until = async (fn, ms = 4000) => {
   check('a page that is ready only after the time limit: notSent, and nothing goes out',
     [pick(tooSlow, ['ok', 'notSent']), sentIn(WANG), await until(() => S.status().empty)], [{ ok: false, notSent: true }, ['你好'], true]);
 
+  console.log('--- the user is at the keyboard too ---');
+  // Between typing and Enter the text sits in a box the user can reach.
+  const beaten = send({ text: '使用者按了 Enter' });
+  await until(() => box().value.length > 0);   // typed; the page is settling
+  mock.pressEnter();
+  const beat = await beaten;
+  check('the user\'s own Enter sends the text before the page asks for a go: the caller hears sent, with the reason, and there is one bubble',
+    [beat.ok, /not this script/.test(beat.why || ''), sentIn(WANG).filter(t => t === '使用者按了 Enter').length], [true, true, 1]);
+  check('...and the same text again is refused: the guard was not freed',
+    [pick(await send({ text: '使用者按了 Enter' }), ['ok', 'duplicate']), sentIn(WANG).filter(t => t === '使用者按了 Enter').length], [{ ok: false, duplicate: true }, 1]);
+  const typedInto = send({ text: '使用者多打了字', reportMs: 8000 });
+  await until(() => box().value.length > 0);
+  mock.keystrokes('!!');
+  const mixedUp = await typedInto;
+  check('the user types into the text: no Enter from the page, unconfirmed, the box left to them',
+    [pick(mixedUp, ['ok', 'unconfirmed', 'notSent']), box().value, sentIn(WANG).includes('使用者多打了字')], [{ ok: false, unconfirmed: true, notSent: undefined }, ['使用者多打了字!!'], false]);
+  mock.typeByHand('');
+  // The hub has already given up (and said notSent) when the user's Enter sends the text after all.
+  const lateEnter = send({ text: '放棄之後使用者按了 Enter', commitMs: 100, reportMs: 50 });
+  await until(() => box().value.length > 0);
+  check('the hub gives up on a page that is not ready in time: notSent to the caller', pick(await lateEnter, ['ok', 'notSent']), { ok: false, notSent: true });
+  mock.pressEnter();   // the text is still in the box: the page is settling
+  check('...then the user\'s Enter sends it: the page says so, late',
+    await until(() => logged('SENT').some(e => e.text === '放棄之後使用者按了 Enter' && e.late), 8000), true);
+  check('...and asking again does not send it a second time',
+    [pick(await send({ text: '放棄之後使用者按了 Enter' }), ['ok', 'duplicate']), sentIn(WANG).filter(t => t === '放棄之後使用者按了 Enter').length], [{ ok: false, duplicate: true }, 1]);
+
   console.log('--- the hub goes down before Enter ---');
   const beforeGo = send({ text: '還沒按就斷線' });
   await until(() => box().value.length > 0);   // the page has typed it, and is settling
   await hub.close();
   check('the caller hears a definite notSent', pick(await beforeGo, ['ok', 'notSent']), { ok: false, notSent: true });
   check('...the page takes its text back', await until(() => S.status().empty), true);
-  check('...and nothing was sent', sentIn(WANG), ['你好']);
+  check('...and nothing was sent', sentIn(WANG).includes('還沒按就斷線'), false);
   hub = await startHub({ dir, port, downAfterMs: 30000 });
   check('a new hub on the same port: the page comes back without a new paste', await pageBack(), true);
   check('...and tells it what became of that message',
@@ -110,6 +145,10 @@ const until = async (fn, ms = 4000) => {
   check('...and the next hub learns it was sent, under the same id',
     await until(() => logged('SENT').some(e => e.id === afterGo.id && e.late), 6000), true);
   check('still one bubble after the page reconnected', sentIn(WANG).filter(t => t === '按了之後斷線').length, 1);
+  await pageBack();
+  await call('status');   // the new hub learns the chats
+  check('...and the new hub, told late that it went out, refuses the same text again',
+    [pick(await send({ text: '按了之後斷線' }), ['ok', 'duplicate']), sentIn(WANG).filter(t => t === '按了之後斷線').length], [{ ok: false, duplicate: true }, 1]);
 
   console.log('--- following, and replies inside what was approved ---');
   await pageBack();
@@ -129,6 +168,7 @@ const until = async (fn, ms = 4000) => {
   S.relay.stop();
   await hub.close();
   fs.rmSync(dir, { recursive: true, force: true });
+  finished = true;
   console.log(failures === 0 ? '\nALL PASSED' : `\n${failures} FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 })().catch(e => { console.error(e); process.exit(1); });
